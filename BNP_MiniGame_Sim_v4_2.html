@@ -1,0 +1,571 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<title>BNP Mini‑Game v4 — Single‑Sheet Logic</title>
+<style>
+  :root { --bg:#0c0c12; --fg:#eef0f4; --panel:#14141a; --border:#2a2a34; --muted:#9aa0a6; --pill:#0f1116; }
+  html, body { background:var(--bg); color:var(--fg); font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
+  .wrap { max-width: 1440px; margin: 16px auto; display:grid; grid-template-columns: 1fr 1fr; gap:16px; }
+  .card { background:var(--panel); border:1px solid var(--border); border-radius:12px; padding:12px; }
+  canvas { border:1px solid var(--border); background:#000; image-rendering: pixelated; }
+  .row { display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
+  .pill { border:1px solid var(--border); padding:6px 10px; border-radius:999px; background:var(--pill); }
+  label { display:inline-flex; align-items:center; gap:8px; }
+  .muted { color:var(--muted); font-size:12px; }
+  .grid { display:grid; grid-template-columns: repeat(2, 1fr); gap:8px; }
+  .stat { display:flex; justify-content:space-between; font-variant-numeric: tabular-nums; }
+  .tiny { font-size:11px; }
+  details summary { cursor:pointer; }
+  .weights { font-variant-numeric: tabular-nums; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <!-- LEFT: BNP Texture Sheet + Controls -->
+  <div class="card">
+    <div class="row">
+      <div class="pill">BNP Sheet · Single‑Sheet State · Layer Viewer · Gradient Micro · Anisotropic Bus (B only)</div>
+      <div class="muted tiny">Hover to see quantized tuple + Hash128</div>
+    </div>
+    <div class="row" style="margin-top:8px;">
+      <canvas id="sheet" width="384" height="384" title="Sheet"></canvas>
+      <canvas id="overlay" width="384" height="384" title="Overlay"></canvas>
+    </div>
+    <div class="row">
+      <button id="play" class="pill">▶ Play</button>
+      <button id="pause" class="pill">⏸ Pause</button>
+      <button id="step" class="pill">⏭ Step</button>
+      <label class="pill">FPS <input id="fps" type="range" min="1" max="60" value="20"><span id="fpsv">20</span></label>
+      <label class="pill">B bits <input id="bits" type="range" min="6" max="14" value="11"><span id="bitsv">11</span></label>
+      <label class="pill">α base <input id="alpha" type="range" min="0" max="50" value="24"><span id="alphav">0.24</span></label>
+      <label class="pill">α·S<sub>z</sub> <input id="alphas" type="range" min="0" max="200" value="50"><span id="alphasv">0.50</span></label>
+      <label class="pill">Aniso κ <input id="aniso" type="range" min="0" max="100" value="40"><span id="anisov">0.40</span></label>
+    </div>
+    <div class="row tiny">
+      <label><input type="checkbox" id="showTerr" checked> Territories</label>
+      <label><input type="checkbox" id="showGates" checked> Gate stripes</label>
+      <label><input type="checkbox" id="showReq" checked> REQ/ACK</label>
+      <label><input type="checkbox" id="useConsensus"> Consensus gate diffusion</label>
+      <label><input type="checkbox" id="showHUD" checked> Hover HUD</label>
+      <label><input type="checkbox" id="residual"> Residual slice (display only)</label>
+      <label><input type="checkbox" id="enableMicro" checked> Gradient Micro</label>
+    </div>
+    <div class="row tiny">
+      <label class="pill">Layer
+        <select id="layer">
+          <option value="rgb">RGB (world)</option>
+          <option value="B">B Potential</option>
+          <option value="grad">∇B Magnitude</option>
+          <option value="R">R (A trail)</option>
+          <option value="G">G (B trail)</option>
+          <option value="A">A (C trail)</option>
+          <option value="owner">Ownership</option>
+          <option value="gates">Gate Mask</option>
+          <option value="clamp">Clamp Heat</option>
+          <option value="resbits">Resource Bits (rows 100..112)</option>
+          <option value="regs">Agent Registers (rows 113..115)</option>
+          <option value="score">Scoreboard (row 116)</option>
+          <option value="rng">RNG (row 117)</option>
+        </select>
+      </label>
+      <label class="pill">Grad gain <input id="ggain" type="range" min="10" max="200" value="80"><span id="ggainv">0.80</span></label>
+      <label class="pill">Grad smooth <input id="gsmooth" type="range" min="0" max="100" value="12"><span id="gsmoothv">0.12</span></label>
+    </div>
+    <div id="hud" class="tiny muted" style="min-height: 3.2em; margin-top:6px;">Hover the left canvas…</div>
+  </div>
+
+  <!-- RIGHT: Game Map + Controls + Learning HUD -->
+  <div class="card">
+    <div class="row">
+      <div class="pill">Mini‑Game v4 · 100×100 · Single‑Sheet</div>
+      <div class="muted tiny">HP cost/heal, ∇B nav, anisotropic bus, combat, learning</div>
+    </div>
+    <div class="row" style="margin-top:8px;">
+      <canvas id="game" width="400" height="400" title="Game"></canvas>
+    </div>
+    <div class="row">
+      <label class="pill">Spawn % <input id="spawn" type="range" min="0" max="100" value="8"><span id="spawnv">0.08</span></label>
+      <label class="pill">Speed <input id="speed" type="range" min="1" max="5" value="1"><span id="speedv">1</span></label>
+      <label class="pill">Move HP cost <input id="movec" type="range" min="0" max="1" step="0.01" value="0.10"><span id="movecv">0.10</span></label>
+      <label class="pill">Heal/resource <input id="heal" type="range" min="1" max="50" value="15"><span id="healv">15</span></label>
+      <label class="pill">Atk RNG <input id="arng" type="range" min="0" max="5" value="2"><span id="arngv">2</span></label>
+      <label class="pill">Def RNG <input id="drng" type="range" min="0" max="5" value="2"><span id="drngv">2</span></label>
+      <label class="pill">Crit % <input id="crit" type="range" min="0" max="50" value="10"><span id="critv">10%</span></label>
+      <label class="pill">Respawn cd <input id="cool" type="range" min="30" max="600" value="200"><span id="coolv">200</span></label>
+      <label class="pill">Learning <input id="learn" type="checkbox" checked></label>
+      <label class="pill">Mutation <input id="mut" type="range" min="0" max="100" value="15"><span id="mutv">0.15</span></label>
+      <label class="pill"><input id="arrows" type="checkbox" checked> Gradient arrows</label>
+      <label class="pill">Arrow stride <input id="stride" type="range" min="4" max="20" value="8"><span id="stridev">8</span></label>
+      <label class="pill">Seed <input id="seed" type="number" value="1337" style="width:90px;"></label>
+      <button id="reset" class="pill">↻ Reset</button>
+    </div>
+    <details style="margin-top:8px;">
+      <summary>Fitness weights</summary>
+      <div class="row tiny">
+        <label class="pill">w(wins) <input id="fwins" type="range" min="0" max="200" value="100"><span id="fwinsv">100</span></label>
+        <label class="pill">w(resources) <input id="fres" type="range" min="0" max="50" value="5"><span id="fresv">5</span></label>
+        <label class="pill">w(HP) <input id="fhp" type="range" min="0" max="100" value="1"><span id="fhpv">1</span></label>
+        <label class="pill">w(survival) <input id="fsurv" type="range" min="0" max="2" value="1"><span id="fsurvv">1</span></label>
+      </div>
+    </details>
+    <div class="grid" style="margin-top:8px;">
+      <div class="stat"><span>Frames</span><span id="gt_t">0</span></div>
+      <div class="stat"><span>Resources</span><span id="gt_res">0</span></div>
+      <div class="stat"><span>Fights</span><span id="gt_fight">0</span></div>
+      <div class="stat"><span>Wins A/B/C</span><span id="gt_wins">0/0/0</span></div>
+      <div class="stat"><span>A HP</span><span id="hpA">100</span></div>
+      <div class="stat"><span>B HP</span><span id="hpB">100</span></div>
+      <div class="stat"><span>C HP</span><span id="hpC">100</span></div>
+      <div class="stat"><span>Alive</span><span id="alive">3</span></div>
+    </div>
+    <details style="margin-top:8px;">
+      <summary>Learning & Weights</summary>
+      <div class="tiny muted weights" id="whud"></div>
+    </details>
+  </div>
+</div>
+
+<script>
+/*** Sheet dims and helpers ***/
+const W=128,H=128,SCALE=3, GW=100, GH=100, GS=4;
+const sheetCanvas=document.getElementById('sheet'), overlayCanvas=document.getElementById('overlay');
+const sctx=sheetCanvas.getContext('2d'), octx=overlayCanvas.getContext('2d'); sctx.imageSmoothingEnabled=false; octx.imageSmoothingEnabled=false;
+const gameCanvas=document.getElementById('game'); const gctx=gameCanvas.getContext('2d'); gctx.imageSmoothingEnabled=false;
+
+function idx(x,y){ return y*W+x; }
+function clamp(v,lo,hi){ return v<lo?lo:(v>hi?hi:v); }
+function clamp11(v){ return v<-1?-1:(v>1?1:v); }
+function norm01(v){ return (v+1)*0.5; }
+function qdq(v,B){ const vmax=(1<<B)-1; let u=Math.round(((v+1)*0.5)*vmax); if(u<0)u=0; if(u>vmax)u=vmax; return (2*u)/vmax-1; }
+function f2byte(v){ return clamp(Math.round(norm01(clamp11(v))*255),0,255); }
+function byte2f(b){ return (b/255)*2-1; }
+
+/*** Controls ***/
+const btnPlay=document.getElementById('play'), btnPause=document.getElementById('pause'), btnStep=document.getElementById('step');
+const fpsSl=document.getElementById('fps'), fpsLbl=document.getElementById('fpsv');
+const bitsSl=document.getElementById('bits'), bitsLbl=document.getElementById('bitsv');
+const alphaSl=document.getElementById('alpha'), alphaLbl=document.getElementById('alphav');
+const alphasSl=document.getElementById('alphas'), alphasLbl=document.getElementById('alphasv');
+const anisoSl=document.getElementById('aniso'), anisoLbl=document.getElementById('anisov');
+const layerSel=document.getElementById('layer');
+const ggainSl=document.getElementById('ggain'), ggainLbl=document.getElementById('ggainv');
+const gsmoothSl=document.getElementById('gsmooth'), gsmoothLbl=document.getElementById('gsmoothv');
+const spawnSl=document.getElementById('spawn'), spawnLbl=document.getElementById('spawnv');
+const speedSl=document.getElementById('speed'), speedLbl=document.getElementById('speedv');
+const moveCSL=document.getElementById('movec'), moveCL=document.getElementById('movecv');
+const healSL=document.getElementById('heal'), healL=document.getElementById('healv');
+const arngSl=document.getElementById('arng'), arngL=document.getElementById('arngv');
+const drngSl=document.getElementById('drng'), drngL=document.getElementById('drngv');
+const critSl=document.getElementById('crit'), critL=document.getElementById('critv');
+const coolSl=document.getElementById('cool'), coolLbl=document.getElementById('coolv');
+const learnCB=document.getElementById('learn'), mutSl=document.getElementById('mut'), mutLbl=document.getElementById('mutv');
+const fwinsSl=document.getElementById('fwins'), fwinsLbl=document.getElementById('fwinsv');
+const fresSl=document.getElementById('fres'), fresLbl=document.getElementById('fresv');
+const fhpSl=document.getElementById('fhp'), fhpLbl=document.getElementById('fhpv');
+const fsurvSl=document.getElementById('fsurv'), fsurvLbl=document.getElementById('fsurvv');
+const arrowsCB=document.getElementById('arrows'), strideSl=document.getElementById('stride'), strideLbl=document.getElementById('stridev');
+const seedInput=document.getElementById('seed'); const btnReset=document.getElementById('reset');
+const gt_t=document.getElementById('gt_t'), gt_res=document.getElementById('gt_res'), gt_fight=document.getElementById('gt_fight'), gt_wins=document.getElementById('gt_wins');
+const hpA=document.getElementById('hpA'), hpB=document.getElementById('hpB'), hpC=document.getElementById('hpC'), aliveLbl=document.getElementById('alive');
+const whud=document.getElementById('whud');
+const showTerr=document.getElementById('showTerr'), showGates=document.getElementById('showGates'), showReq=document.getElementById('showReq');
+const useCons=document.getElementById('useConsensus'), showHUD=document.getElementById('showHUD'), residual=document.getElementById('residual');
+const enableMicro=document.getElementById('enableMicro'); const hudDiv=document.getElementById('hud');
+
+/*** Channels (sheet) ***/
+let Bbits=11, frame=0, playing=false, timer=null;
+const R=new Float32Array(W*H), G=new Float32Array(W*H), Bc=new Float32Array(W*H), A=new Float32Array(W*H);
+const Q=new Float32Array(W*H), P=new Float32Array(W*H), Sx=new Float32Array(W*H), Sy=new Float32Array(W*H), Sz=new Float32Array(W*H);
+const owner=new Uint8Array(W*H), gateStripe=new Uint8Array(W*H);
+const REQ=new Uint8Array(W*H), ACK=new Uint8Array(W*H);
+const clampHeat=new Uint16Array(W*H);
+const dBx=new Float32Array(W*H), dBy=new Float32Array(W*H), dBm=new Float32Array(W*H);
+
+let totalResources=0, fights=0, worldFrames=0, rounds=0;
+
+/*** Layout (registers) ***/
+const RES_ROW0=100, RES_ROWS=13; // rows 100..112 inclusive
+const AGENT_ROW=[113,114,115];    // A,B,C
+const SCORE_ROW=116;              // wins & rounds
+const RNG_ROW=117;                // 24-bit state in RGB (col 0)
+
+// ----- Resource bitfield helpers -----
+function res_e_for(x,y){ const t=y*GW+x; const e=(t/8)|0; const row=RES_ROW0 + (e/128|0); const col=(e%128)|0; return {row,col,bit:(t&7)}; }
+function res_get(x,y){
+  const {row,col,bit}=res_e_for(x,y); const i=idx(col,row);
+  const byte=f2byte(R[i]); return ((byte>>bit)&1)===1;
+}
+function res_set(x,y,val){
+  const {row,col,bit}=res_e_for(x,y); const i=idx(col,row);
+  let byte=f2byte(R[i]);
+  if(val){ byte|=(1<<bit); } else { byte&=~(1<<bit); }
+  R[i]=qdq(byte2f(byte), Bbits);
+}
+
+// ----- Agent register helpers -----
+function reg_i(row,col){ return idx(col,row); }
+function enc01(v){ return qdq(v*2-1, Bbits); }
+function dec01(f){ return clamp((norm01(f)),0,1); }
+
+function setHP(k, hp){ const i=reg_i(AGENT_ROW[k],0); const v=clamp(hp,0,100); R[i]=enc01(v/100); }
+function getHP(k){ const i=reg_i(AGENT_ROW[k],0); return Math.round(dec01(R[i])*100); }
+
+function setCD(k, cd){ const i=reg_i(AGENT_ROW[k],0); const j=i; G[j]=enc01(clamp(cd,0,600)/600); }
+function getCD(k){ const i=reg_i(AGENT_ROW[k],0); return Math.round(dec01(G[i])*600); }
+
+function setAlive(k, alive){ const i=reg_i(AGENT_ROW[k],0); Bc[i]=enc01(alive?1:0); }
+function getAlive(k){ const i=reg_i(AGENT_ROW[k],0); return dec01(Bc[i])>0.5; }
+
+function setWeights(k, seek, avoid, hunt, thrift){
+  const i=reg_i(AGENT_ROW[k],1);
+  R[i]=enc01(clamp(seek,0,2)/2); G[i]=enc01(clamp(avoid,0,2)/2);
+  Bc[i]=enc01(clamp(hunt,0,2)/2); A[i]=enc01(clamp(thrift,0,2)/2);
+}
+function getWeights(k){
+  const i=reg_i(AGENT_ROW[k],1);
+  return {
+    seek:  dec01(R[i])*2,
+    avoid: dec01(G[i])*2,
+    hunt:  dec01(Bc[i])*2,
+    thrift:dec01(A[i])*2
+  };
+}
+
+function setPos(k,x,y){ const i=reg_i(AGENT_ROW[k],2); R[i]=enc01(clamp(x,0,99)/99); G[i]=enc01(clamp(y,0,99)/99); }
+function getPos(k){ const i=reg_i(AGENT_ROW[k],2); return { x:Math.round(dec01(R[i])*99), y:Math.round(dec01(G[i])*99) }; }
+
+// Scoreboard
+function setWins(a,b,c){ const i=reg_i(SCORE_ROW,0); R[i]=enc01(clamp(a,0,255)/255); G[i]=enc01(clamp(b,0,255)/255); Bc[i]=enc01(clamp(c,0,255)/255); }
+function getWins(){ const i=reg_i(SCORE_ROW,0); return {A:Math.round(dec01(R[i])*255), B:Math.round(dec01(G[i])*255), C:Math.round(dec01(Bc[i])*255)}; }
+function setRounds(n){ const i=reg_i(SCORE_ROW,0); A[i]=enc01(clamp(n,0,255)/255); }
+function getRounds(){ const i=reg_i(SCORE_ROW,0); return Math.round(dec01(A[i])*255); }
+
+// RNG
+function rng_set(state){ const i=reg_i(RNG_ROW,0); const r=(state>>16)&255, g=(state>>8)&255, b=state&255; R[i]=enc01(r/255); G[i]=enc01(g/255); Bc[i]=enc01(b/255); }
+function rng_get(){ const i=reg_i(RNG_ROW,0); const r=f2byte(R[i]), g=f2byte(G[i]), b=f2byte(Bc[i]); return ((r<<16)|(g<<8)|b)>>>0; }
+function rng_next(){ let s=rng_get(); s = (((s*1664525)>>>0) + 1013904223) & 0xFFFFFF; rng_set(s); return s; }
+function rand(){ return rng_next()/16777216; }
+function rint(lo,hi){ return Math.floor(rand()*(hi-lo+1))+lo; }
+
+/*** Init seed sheet ***/
+function seedSheet(){
+  for(let y=0;y<H;y++) for(let x=0;x<W;x++){
+    const i=idx(x,y);
+    const xn=(x/(W-1))*2-1, yn=(y/(H-1))*2-1;
+    R[i]=qdq(xn,Bbits); G[i]=qdq(yn,Bbits); Bc[i]=qdq(0,Bbits); A[i]=qdq(0,Bbits);
+    const r=Math.hypot(xn,yn), th=Math.atan2(yn,xn);
+    Sx[i]=qdq(Math.cos(th),12); Sy[i]=qdq(Math.sin(th),12); Sz[i]=qdq(clamp(1.0-r,-1,1),12);
+    owner[i]= (x<Math.floor(W/3))?0: (x<Math.floor(2*W/3)?1:2);
+    gateStripe[i]=((y&1) && owner[i]===2)?1:0;
+    REQ[i]=ACK[i]=0; clampHeat[i]=0; dBx[i]=dBy[i]=dBm[i]=0;
+  }
+  // clear resource rows
+  for(let r=0;r<RES_ROWS;r++) for(let x=0;x<128;x++){ const i=idx(x,RES_ROW0+r); R[i]=qdq(byte2f(0),Bbits); }
+}
+
+/*** Rendering ***/
+function renderSheet(){
+  const mode=layerSel.value;
+  const img=sctx.createImageData(W,H);
+  for(let y=0;y<H;y++) for(let x=0;x<W;x++){
+    const i=idx(x,y), k=4*i; let r=0,g=0,b=0;
+    if(mode==='rgb'){ r=norm01(R[i]); g=norm01(G[i]); b=norm01(Bc[i]); }
+    else if(mode==='B'){ g=norm01(Bc[i]); }
+    else if(mode==='grad'){ const m=Math.min(1, Math.hypot(dBx[i],dBy[i])); r=m; g=m; b=m; }
+    else if(mode==='R'){ r=norm01(R[i]); }
+    else if(mode==='G'){ g=norm01(G[i]); }
+    else if(mode==='A'){ b=norm01(A[i]); }
+    else if(mode==='owner'){ const o=owner[i]; if(o===0){r=0.2;g=0.5;b=1;} else if(o===1){r=1;g=0.3;b=0.3;} else {r=0.2;g=1;b=0.6;} }
+    else if(mode==='gates'){ if(gateStripe[i]){ r=0.8; g=0.8; b=1.0; } }
+    else if(mode==='clamp'){ const h=Math.min(1, clampHeat[i]/8.0); r=h; }
+    else if(mode==='resbits'){ if(y>=RES_ROW0 && y<RES_ROW0+RES_ROWS){ const byte=f2byte(R[i]); const v=byte/255; r=v; g=v; b=0; } }
+    else if(mode==='regs'){
+      if(y>=AGENT_ROW[0] && y<=AGENT_ROW[2]){ r=norm01(R[i]); g=norm01(G[i]); b=norm01(Bc[i]); }
+    }
+    else if(mode==='score' && y===SCORE_ROW){ r=norm01(R[i]); g=norm01(G[i]); b=norm01(Bc[i]); }
+    else if(mode==='rng' && y===RNG_ROW){ r=norm01(R[i]); g=norm01(G[i]); b=norm01(Bc[i]); }
+    img.data[k+0]=Math.round(r*255); img.data[k+1]=Math.round(g*255); img.data[k+2]=Math.round(b*255); img.data[k+3]=255;
+  }
+  const off=document.createElement('canvas'); off.width=W; off.height=H; off.getContext('2d').putImageData(img,0,0);
+  sctx.clearRect(0,0,384,384); sctx.drawImage(off,0,0,W,H,0,0,384,384);
+}
+function drawOverlay(){
+  const img=octx.createImageData(W,H);
+  if(document.getElementById('showTerr').checked || document.getElementById('showGates').checked || document.getElementById('showReq').checked){
+    for(let y=0;y<H;y++) for(let x=0;x<W;x++){
+      const i=idx(x,y), j=4*i; let r=0,g=0,b=0,a=0;
+      if(showTerr.checked){ if(owner[i]===0){ r+=0.12; g+=0.30; b+=0.65; a=0.22; } else if(owner[i]===1){ r+=0.65; g+=0.18; b+=0.18; a=0.22; } else { r+=0.10; g+=0.55; b+=0.28; a=0.22; } }
+      if(showGates.checked && gateStripe[i]){ r+=0.08; g+=0.08; b+=0.10; a=Math.max(a,0.35); }
+      if(showReq.checked && REQ[i]){ g=1.0; a=0.7; }
+      if(showReq.checked && ACK[i]){ r=1.0; g=0.86; a=0.7; }
+      img.data[j+0]=Math.round(r*255); img.data[j+1]=Math.round(g*255); img.data[j+2]=Math.round(b*255); img.data[j+3]=Math.round(a*255);
+    }
+  }
+  const off=document.createElement('canvas'); off.width=W; off.height=H; off.getContext('2d').putImageData(img,0,0);
+  octx.clearRect(0,0,384,384); octx.drawImage(off,0,0,W,H,0,0,384,384);
+}
+
+/*** Bus: anisotropic diffusion on B channel only ***/
+function sharedPathwayB(alphaBase, alphaScale, consensus, kAniso){
+  const B0=Bc.slice(0);
+  for(let y=0;y<H;y++) for(let x=0;x<W;x++){
+    const i=idx(x,y);
+    let af=alphaBase + alphaScale * (Math.max(0, (Sz[i])) * 0.5);
+    if(consensus){ const m=((x^y)&1)?0.0:1.0; af*=m; }
+    af=clamp(af,0,1);
+    const ir=idx(Math.min(x+1,W-1),y), il=idx(Math.max(x-1,0),y), id=idx(x,Math.min(y+1,H-1)), iu=idx(x,Math.max(y-1,0));
+    const vx=Sx[i], vy=Sy[i], k=kAniso;
+    let wR=1 + k*(vx*1), wL=1 + k*(vx*-1), wD=1 + k*(vy*1), wU=1 + k*(vy*-1);
+    wR=Math.max(0,wR); wL=Math.max(0,wL); wD=Math.max(0,wD); wU=Math.max(0,wU);
+    const sum = Math.max(1e-6, wR+wL+wD+wU); wR/=sum; wL/=sum; wD/=sum; wU/=sum;
+    const mixB=wR*B0[ir]+wL*B0[il]+wD*B0[id]+wU*B0[iu];
+    Bc[i]=qdq(clamp11((1-af)*B0[i] + af*mixB), Bbits);
+  }
+}
+
+/*** Micro: gradient ***/
+function gradientMicro(gain, smooth){
+  for(let y=0;y<H;y++) for(let x=0;x<W;x++){
+    const i=idx(x,y);
+    const xr=Bc[idx(Math.min(x+1,W-1),y)], xl=Bc[idx(Math.max(x-1,0),y)];
+    const yd=Bc[idx(x,Math.min(y+1,H-1))], yu=Bc[idx(x,Math.max(y-1,0))];
+    let gx=(xr-xl)*0.5*gain, gy=(yd-yu)*0.5*gain;
+    dBx[i]=gx; dBy[i]=gy; dBm[i]=Math.hypot(gx,gy);
+  }
+  if(smooth>0){
+    for(let y=0;y<H;y++) for(let x=0;x<W;x++){
+      const i=idx(x,y);
+      const ir=idx(Math.min(x+1,W-1),y), il=idx(Math.max(x-1,0),y), id=idx(x,Math.min(y+1,H-1)), iu=idx(x,Math.max(y-1,0));
+      dBx[i]=(1-smooth)*dBx[i] + smooth*0.25*(dBx[ir]+dBx[il]+dBx[id]+dBx[iu]);
+      dBy[i]=(1-smooth)*dBy[i] + smooth*0.25*(dBy[ir]+dBy[il]+dBy[id]+dBy[iu]);
+      dBm[i]=Math.hypot(dBx[i],dBy[i]);
+    }
+  }
+}
+
+/*** Global: spawn resources ***/
+function spawnResource(pct){
+  if(rand() < pct){
+    const x=rint(0,GW-1), y=rint(0,GH-1);
+    if(!res_get(x,y)){
+      res_set(x,y,true); totalResources++;
+      const i=idx(x,y);
+      Bc[i]=qdq(clamp11(Bc[i]+0.9), Bbits);
+    }
+  }
+}
+
+/*** Agent step & combat ***/
+function readGradAt(x,y){ const i=idx(x,y); return {gx:dBx[i], gy:dBy[i], b:Bc[i]}; }
+
+function stepAgent(k, speed){
+  if(!getAlive(k)){ const cd=getCD(k); if(cd>0) setCD(k, cd-1); return; }
+  let {x,y}=getPos(k);
+  let hp=getHP(k);
+  const moveCost=parseFloat(moveCSL.value); hp-=moveCost*speed; if(hp<=0){ setAlive(k,false); setCD(k, parseInt(coolSl.value,10)); setHP(k,0); return; }
+  setHP(k,hp);
+
+  // trail
+  const i=idx(x,y); if(k===0) R[i]=qdq(clamp11(R[i]+0.2),Bbits); if(k===1) G[i]=qdq(clamp11(G[i]+0.2),Bbits); if(k===2) A[i]=qdq(clamp11(A[i]+0.2),Bbits);
+
+  const w=getWeights(k);
+  for(let s=0;s<speed;s++){
+    const g=readGradAt(x,y);
+    // enemy influence
+    let ex=0, ey=0;
+    for(let j=0;j<3;j++){ if(j===k || !getAlive(j)) continue;
+      const p=getPos(j); const dx=x-p.x, dy=y-p.y; const d2=Math.max(1, dx*dx+dy*dy); ex+=dx/d2; ey+=dy/d2;
+    }
+    const hpFrac = getHP(k)/100.0;
+    const w_seek = w.seek * (1.0 + (1-hpFrac)*w.thrift);
+    const w_avoid = w.avoid * (1.0 + (1-hpFrac));
+    const w_hunt = w.hunt * hpFrac;
+    let vx = w_seek*g.gx + w_avoid*ex - w_hunt*ex;
+    let vy = w_seek*g.gy + w_avoid*ey - w_hunt*ey;
+    vx += (rand()-0.5)*0.1; vy += (rand()-0.5)*0.1;
+
+    const options=[[0,0],[1,0],[-1,0],[0,1],[0,-1]];
+    let best=[0,0,-1e9];
+    for(const o of options){
+      const ux=o[0], uy=o[1]; const dot=vx*ux+vy*uy;
+      const nx=clamp(x+ux,0,GW-1), ny=clamp(y+uy,0,GH-1);
+      const bNext=readGradAt(nx,ny).b; const util=0.8*dot + 0.2*bNext + (rand()-0.5)*0.01;
+      if(util>best[2]) best=[ux,uy,util];
+    }
+    x=clamp(x+best[0],0,GW-1); y=clamp(y+best[1],0,GH-1);
+
+    // resource pickup
+    if(res_get(x,y)){ res_set(x,y,false); setHP(k, Math.min(100, getHP(k)+parseInt(healSL.value,10))); totalResources--; }
+  }
+  setPos(k,x,y);
+}
+
+function resolveCombat(){
+  const p=[getPos(0),getPos(1),getPos(2)]; const alive=[getAlive(0),getAlive(1),getAlive(2)];
+  for(let iA=0;iA<3;iA++) for(let iB=iA+1;iB<3;iB++){
+    if(alive[iA] && alive[iB] && p[iA].x===p[iB].x && p[iA].y===p[iB].y){
+      fights++;
+      const ar = 2 + ((rng_next()>>>0)% (parseInt(arngSl.value,10)+1));
+      const br = 2 + ((rng_next()>>>0)% (parseInt(arngSl.value,10)+1));
+      const da = 3 + ((rng_next()>>>0)% (parseInt(drngSl.value,10)+1));
+      const db = 3 + ((rng_next()>>>0)% (parseInt(drngSl.value,10)+1));
+      let dmgToB=Math.max(0, ar-db), dmgToA=Math.max(0, br-da);
+      if(rand() < parseInt(critSl.value,10)/100){ dmgToB*=2; }
+      if(rand() < parseInt(critSl.value,10)/100){ dmgToA*=2; }
+      setHP(iB, Math.max(0, getHP(iB)-dmgToB));
+      setHP(iA, Math.max(0, getHP(iA)-dmgToA));
+      if(getHP(iB)<=0){ setAlive(iB,false); setCD(iB, parseInt(coolSl.value,10)); }
+      if(getHP(iA)<=0){ setAlive(iA,false); setCD(iA, parseInt(coolSl.value,10)); }
+    }
+  }
+}
+
+function respawns(){
+  for(let k=0;k<3;k++){
+    if(!getAlive(k)){ const cd=getCD(k); if(cd===0){
+      let x=rint(0,GW-1), y=rint(0,GH-1);
+      setPos(k,x,y); setHP(k,100); setAlive(k,true);
+    }}
+  }
+}
+
+function checkWinAndLearn(){
+  const alive = [getAlive(0),getAlive(1),getAlive(2)].filter(a=>a).length;
+  const cooling= [0,1,2].filter(k=>!getAlive(k) && getCD(k)>0).length;
+  if(alive===1 && cooling===2){
+    let winner=0; for(let k=0;k<3;k++) if(getAlive(k)) winner=k;
+    const w=getWins(); if(winner===0) setWins(w.A+1, w.B, w.C); if(winner===1) setWins(w.A, w.B+1, w.C); if(winner===2) setWins(w.A, w.B, w.C+1);
+    setRounds(getRounds()+1);
+    rounds++;
+    if(learnCB.checked){
+      const ww=parseInt(fwinsSl.value,10), hw=parseInt(fhpSl.value,10);
+      const fit=[0,1,2].map(k=> (k===winner? ww:0) + hw*getHP(k));
+      const bestIdx= fit.indexOf(Math.max(...fit));
+      const base=getWeights(bestIdx); const mut=parseInt(mutSl.value,10)/100;
+      for(let k=0;k<3;k++){ if(k===bestIdx) continue;
+        const jitter=(v)=> Math.max(0.05, v*(1+(rand()*2-1)*mut));
+        setWeights(k, jitter(base.seek), jitter(base.avoid), jitter(base.hunt), jitter(base.thrift));
+      }
+    }
+    for(let y=0;y<GH;y++) for(let x=0;x<GW;x++){ Bc[idx(x,y)]=qdq(0,Bbits); res_set(x,y,false); }
+    totalResources=0; fights=0; worldFrames=0;
+    for(let k=0;k<3;k++){ setHP(k,100); setAlive(k,true); setCD(k,0); setPos(k, rint(0,GW-1), rint(0,GH-1)); }
+  }
+}
+
+/*** Render game canvas ***/
+function renderGame(){
+  const img=gctx.createImageData(GW,GH);
+  for(let y=0;y<GH;y++) for(let x=0;x<GW;x++){
+    const j=4*(y*GW+x);
+    const pot=norm01(Bc[idx(x,y)]); let r=0,g=pot,b=0,a=255;
+    if(res_get(x,y)){ r=Math.max(r,0.8); g=Math.max(g,0.5); }
+    img.data[j+0]=Math.round(r*255); img.data[j+1]=Math.round(g*255); img.data[j+2]=Math.round(b*255); img.data[j+3]=a;
+  }
+  const off=document.createElement('canvas'); off.width=GW; off.height=GH; off.getContext('2d').putImageData(img,0,0);
+  gctx.clearRect(0,0,400,400); gctx.drawImage(off,0,0,GW,GH,0,0,400,400);
+
+  if(document.getElementById('arrows').checked){
+    const stride=parseInt(strideSl.value,10); strideLbl.textContent=stride;
+    gctx.strokeStyle="#ffffff"; gctx.lineWidth=1;
+    for(let y=stride/2|0; y<GH; y+=stride){
+      for(let x=stride/2|0; x<GW; x+=stride){
+        const gx=dBx[idx(x,y)], gy=dBy[idx(x,y)]; const m=Math.hypot(gx,gy)+1e-6; const ux=gx/m, uy=gy/m;
+        const cx=x*GS+GS/2, cy=y*GS+GS/2, L=6;
+        gctx.beginPath(); gctx.moveTo(cx,cy); gctx.lineTo(cx+ux*L, cy+uy*L); gctx.stroke();
+        const ah=2; gctx.beginPath(); gctx.moveTo(cx+ux*L, cy+uy*L); gctx.lineTo(cx+ux*L-uy*ah, cy+uy*L+ux*ah); gctx.lineTo(cx+ux*L+uy*ah, cy+uy*L-ux*ah); gctx.closePath(); gctx.fillStyle="#ffffff"; gctx.fill();
+      }
+    }
+  }
+
+  const colors=[[50,180,255],[255,80,80],[60,230,140]];
+  for(let k=0;k<3;k++){
+    const {x,y}=getPos(k);
+    const color=`rgb(${colors[k][0]},${colors[k][1]},${colors[k][2]})`;
+    if(getAlive(k)){ gctx.fillStyle=color; gctx.fillRect(x*GS,y*GS,GS,GS); } else { gctx.strokeStyle=color; gctx.strokeRect(x*GS+0.5,y*GS+0.5,GS-1,GS-1); }
+    gctx.fillStyle="#000"; gctx.fillRect(x*GS,y*GS-3,GS,2);
+    gctx.fillStyle=color; gctx.fillRect(x*GS, y*GS-3, Math.max(0, Math.floor(GS*(getHP(k)/100))), 2);
+  }
+}
+
+/*** HUD & hover ***/
+function hash128_of_pixel(x,y){
+  const i=idx(x,y);
+  function qcode(v){ const vmax=(1<<Bbits)-1; let u=Math.round(((v+1)*0.5)*vmax); if(u<0)u=0; if(u>vmax)u=vmax; return u>>>0; }
+  const parts=[qcode(R[i]),qcode(G[i]),qcode(Bc[i]),qcode(A[i]),x,y];
+  let h1=0x9e3779b185ebca87n, h2=0xc2b2ae3d27d4eb4fn;
+  for(const p of parts){ const v=BigInt(p>>>0); h1^=v+0x9e3779b97f4a7c15n+(h1<<6n)+(h1>>2n); h2^=v+0x517cc1b727220a95n+(h2<<6n)+(h2>>2n); }
+  return [(h1^(h2<<1n)) & ((1n<<64n)-1n),(h2^(h1<<1n)) & ((1n<<64n)-1n)];
+}
+sheetCanvas.addEventListener('mousemove',(e)=>{
+  if(!showHUD.checked){ hudDiv.textContent=''; return; }
+  const rect=sheetCanvas.getBoundingClientRect(); const xpix=Math.floor((e.clientX-rect.left)/3), ypix=Math.floor((e.clientY-rect.top)/3);
+  if(xpix<0||xpix>=W||ypix<0||ypix>=H) return;
+  const [hLo,hHi]=hash128_of_pixel(xpix,ypix); const fmt=(n)=>'0x'+n.toString(16).padStart(16,'0');
+  const i=idx(xpix,ypix);
+  hudDiv.innerHTML=`(x=${xpix}, y=${ypix}) · B=${Bbits}<br/>
+    R=${R[i].toFixed(4)} G=${G[i].toFixed(4)} B=${Bc[i].toFixed(4)} A=${A[i].toFixed(4)}<br/>
+    |∇B|=${dBm[i].toFixed(3)} · Hash128=${fmt(hHi)}${fmt(hLo).slice(2)}`;
+});
+
+/*** Main loop ***/
+function tick(){
+  const fps=parseInt(fpsSl.value,10); fpsLbl.textContent=fpsSl.value;
+  Bbits=parseInt(bitsSl.value,10); bitsLbl.textContent=bitsSl.value;
+  const aBase=parseInt(alphaSl.value,10)/100; alphaLbl.textContent=aBase.toFixed(2);
+  const aScale=parseInt(alphasSl.value,10)/100; alphasLbl.textContent=aScale.toFixed(2);
+  const kAniso=parseInt(anisoSl.value,10)/100; anisoLbl.textContent=kAniso.toFixed(2);
+  const gg=parseInt(ggainSl.value,10)/100; ggainLbl.textContent=gg.toFixed(2);
+  const gs=parseInt(gsmoothSl.value,10)/100; gsmoothLbl.textContent=gs.toFixed(2);
+  const pct=parseFloat(spawnSl.value)/100.0; spawnLbl.textContent=pct.toFixed(2);
+  speedLbl.textContent=speedSl.value; moveCL.textContent=parseFloat(moveCSL.value).toFixed(2);
+  healL.textContent=healSL.value; arngL.textContent=arngSl.value; drngL.textContent=drngSl.value; critL.textContent=critSl.value+'%';
+  coolLbl.textContent=coolSl.value; mutLbl.textContent=(mutSl.value/100).toFixed(2);
+  fwinsLbl.textContent=fwinsSl.value; fresLbl.textContent=fresSl.value; fhpLbl.textContent=fhpSl.value; fsurvLbl.textContent=fsurvSl.value;
+
+  sharedPathwayB(aBase,aScale,useCons.checked,kAniso);
+  if(enableMicro.checked) gradientMicro(gg,gs);
+
+  spawnResource(pct);
+
+  for(let k=0;k<3;k++) stepAgent(k, parseInt(speedSl.value,10));
+  resolveCombat(); respawns(); checkWinAndLearn();
+
+  worldFrames++; gt_t.textContent=worldFrames; gt_res.textContent=totalResources; gt_fight.textContent=fights;
+  const wins=getWins(); gt_wins.textContent=`${wins.A}/${wins.B}/${wins.C}`;
+  hpA.textContent=getHP(0); hpB.textContent=getHP(1); hpC.textContent=getHP(2);
+  aliveLbl.textContent=[getAlive(0),getAlive(1),getAlive(2)].filter(v=>v).length;
+
+  renderGame(); renderSheet(); drawOverlay();
+
+  frame++; if(playing){ timer=setTimeout(tick, 1000/Math.max(1,fps)); }
+}
+
+/*** Reset ***/
+function resetAll(){
+  seedSheet();
+  const s = (parseInt(seedInput.value,10)|0) & 0xFFFFFF; rng_set(s || 1337);
+  for(let k=0;k<3;k++){
+    setHP(k,100); setCD(k,0); setAlive(k,true);
+    setWeights(k,1.0,0.5,0.2,0.6);
+    setPos(k, rint(0,GW-1), rint(0,GH-1));
+  }
+  setWins(0,0,0); setRounds(0);
+  totalResources=0; fights=0; worldFrames=0; rounds=0;
+  renderGame(); renderSheet(); drawOverlay(); updateWHUD();
+}
+function updateWHUD(){
+  const fmt=(k)=>{ const w=getWeights(k); return `seek=${w.seek.toFixed(2)} avoid=${w.avoid.toFixed(2)} hunt=${w.hunt.toFixed(2)} thrift=${w.thrift.toFixed(2)}`; };
+  whud.innerHTML=`A: ${fmt(0)}<br/>B: ${fmt(1)}<br/>C: ${fmt(2)}<br/>Rounds: ${getRounds()}`;
+}
+
+btnPlay.onclick=()=>{ if(!playing){ playing=true; tick(); } };
+btnPause.onclick=()=>{ playing=false; if(timer) clearTimeout(timer); };
+btnStep.onclick=()=>{ if(!playing) tick(); };
+btnReset.onclick=()=> resetAll();
+
+resetAll();
+</script>
+</body>
+</html>
