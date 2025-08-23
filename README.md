@@ -1,1 +1,2 @@
 Note, in this version game manager is broken. The full system is not enacted and most of the codebase for this sim is not real. The purpose is to visualize what it would look like under my theory. It's pretty damn close visually. 
+Note, TSP sim solves both static and dynamic pathing between 'cities' when you turn on the performance mode it will fit itself to best avg the score vs. performance or balance. 

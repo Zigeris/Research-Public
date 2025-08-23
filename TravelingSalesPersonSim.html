@@ -1,0 +1,1653 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>BNP Sim — TSP + Predictive Modeling + Self-Optimization</title>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<style>
+  :root{--bg:#0c0f14;--fg:#e7edf5;--muted:#9aa0a6;--panel:#11161c;--accent:#6ee7ff;--ok:#7efc8a;--warn:#ffd166;--mag:#ff6bd6}
+  html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);font:14px/1.4 system-ui,-apple-system, Segoe UI, Roboto, sans-serif}
+  .wrap{display:grid;grid-template-columns:470px 1fr;gap:14px;height:100%}
+  .left{background:var(--panel);padding:14px;border-right:1px solid #1c2530;overflow:auto}
+  h1{font-size:16px;margin:0 0 8px}
+  h2{font-size:13px;margin:16px 0 6px;color:var(--muted);text-transform:uppercase;letter-spacing:.06em}
+  input[type=text]{width:100%;padding:8px 10px;background:#0f151b;border:1px solid #253241;color:var(--fg);border-radius:8px}
+  select,button,input[type=range]{width:100%}
+  select{padding:8px 10px;background:#0f151b;border:1px solid #253241;color:var(--fg);border-radius:8px}
+  button{padding:8px 10px;margin:6px 0;background:#17212b;border:1px solid #253241;color:var(--fg);border-radius:8px}
+  button:hover{border-color:#39526d}
+  .row{display:grid;grid-template-columns:1fr auto;gap:8px;align-items:center}
+  .val{color:var(--accent)}
+  .pill{display:inline-block;padding:2px 6px;border:1px solid #2b3a4b;border-radius:999px;background:#0c1218;color:#b6c1cc;margin-right:6px}
+  .kvs{display:grid;grid-template-columns:auto 1fr;gap:4px 8px;align-items:center}
+  .mono{font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, monospace}
+  .small{font-size:12px}
+  .legend{font-size:12px;color:#b6c1cc}
+  .hr{height:1px;background:#1c2530;margin:10px 0}
+  .twocol{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+  .threecol{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px}
+  .canvwrap{display:grid;grid-template-columns:1fr 1fr;gap:10px;padding:10px}
+  canvas{background:#0a0e13;border:1px solid #1a2430;border-radius:10px;image-rendering:pixelated}
+  label.inline{display:flex;align-items:center;gap:6px}
+  .tag{font-size:11px;color:#b6c1cc}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="left">
+    <h1>BNP TSP — Dynamic Precision + Predictive Modeling + Self-Optimization</h1>
+
+    <div class="kvs">
+      <div>Sheet size</div><div class="mono" id="sz">–</div>
+      <div>FPS</div><div class="mono" id="fps">–</div>
+      <div>Flips/frame</div><div class="mono" id="flips">–</div>
+      <div>Events (rail≠0)</div><div class="mono" id="events">–</div>
+    </div>
+
+    <h2>Run</h2>
+    <div class="row"><button id="btnToggle">▶ Start</button><span class="pill" id="state">paused</span></div>
+    <div class="row"><button id="btnStep">Step (1 tick)</button><span class="pill">deterministic per tick</span></div>
+    <div class="row"><button id="btnReset">Reset / Reseed</button><span></span></div>
+
+    <h2>Data mode</h2>
+    <label class="inline"><input type="checkbox" id="meaning" checked> Meaningful dataset (tri-cluster + payload)</label>
+    <div style="margin-top:6px">
+      <label class="mono small">Payload (encoded into S):</label>
+      <input type="text" id="payload" value="BNP">
+    </div>
+
+    <h2>Event model</h2>
+    <div class="row">
+      <label>Base flip prob / texel <span class="val" id="pFlipVal"></span></label>
+      <input type="range" id="pFlip" min="0" max="0.05" step="0.0005" value="0.002">
+    </div>
+    <div class="row">
+      <label>Edge bias (×) <span class="val" id="edgeBiasVal"></span></label>
+      <input type="range" id="edgeBias" min="0" max="3" step="0.1" value="1.5">
+    </div>
+    <div class="row">
+      <label>Rail radius R (±) <span class="val" id="radVal"></span></label>
+      <input type="range" id="rad" min="1" max="12" step="1" value="5">
+    </div>
+
+    <h2>BNP Systems</h2>
+    <label class="inline"><input type="checkbox" id="q2Enable" checked> Q2 Event Bus</label>
+    <label class="inline small" style="margin-left:18px;"><input type="checkbox" id="q2Morton" checked> Morton region key</label>
+    <div class="row">
+      <label>Q2 cap (KB) <span class="val" id="q2CapVal"></span></label>
+      <input type="range" id="q2Cap" min="1" max="128" step="1" value="16">
+    </div>
+    <div class="threecol">
+      <button id="q2Reset">Reset Q2</button>
+      <button id="q2Copy">Copy Codons</button>
+      <button id="q2ClearH">Clear Histogram</button>
+    </div>
+
+    <div class="hr"></div>
+    <h2>Interpreter & Proper-time (cτ)</h2>
+    <label class="inline"><input type="checkbox" id="intpEnable" checked> Enable micro-interpreter</label>
+    <div class="row small">
+      <label>Micro steps/tick <span class="val" id="ustepsVal"></span></label>
+      <input type="range" id="usteps" min="1" max="32" step="1" value="8">
+    </div>
+    <div class="row small">
+      <label>cτ amplitude <span class="val" id="ctauAmpVal"></span></label>
+      <input type="range" id="ctauAmp" min="0" max="1" step="0.05" value="0.5">
+    </div>
+    <label class="inline small"><input type="checkbox" id="ctauOverlay" checked> Show cτ heatmap</label>
+    <div class="kvs small">
+      <div>Reg energy</div><div class="mono" id="regEnergy">–</div>
+      <div>Micro histogram</div><div class="mono" id="microHist">–</div>
+    </div>
+
+    <div class="hr"></div>
+    <h2>Quadrants / DomainMask</h2>
+    <label class="inline"><input type="checkbox" id="quadEnable" checked> Enforce DomainMask</label>
+    <div class="row small"><button id="quadReseed">Reseed Quadrants</button><span class="tag">RGB/QP/S permissions</span></div>
+    <label class="inline small"><input type="checkbox" id="domainOverlay" checked> Domain overlay (2D)</label>
+    <div class="kvs small">
+      <div>Allowed writes</div><div class="mono" id="wAllow">0</div>
+      <div>Gated (closed)</div><div class="mono" id="wGate">0</div>
+      <div>Clamped by domain</div><div class="mono" id="wClamp">0</div>
+    </div>
+
+    <div class="hr"></div>
+    <h2>SpaceFrame & Residual</h2>
+    <div class="row small">
+      <label>Space frame</label>
+      <select id="spaceFrame">
+        <option value="WORLD" selected>WORLD</option>
+        <option value="MAP">MAP</option>
+        <option value="TILE">TILE</option>
+      </select>
+    </div>
+    <label class="inline small"><input type="checkbox" id="privS" checked> Privileged S writes only</label>
+    <label class="inline small"><input type="checkbox" id="resEnable" checked> Residual promotion (hot tiles)</label>
+
+    <div class="hr"></div>
+    <h2>Logic Layer</h2>
+    <label class="inline"><input type="checkbox" id="logicEnable" checked> Enable logic (per-tile)</label>
+    <div class="row">
+      <label>Function</label>
+      <select id="logicFn">
+        <option value="FA">Full Adder: SUM=A⊕B⊕C, CARRY=maj(A,B,C)</option>
+        <option value="HA">Half Adder: SUM=A⊕B, CARRY=A·B</option>
+        <option value="MAJ">Majority: OUT=maj(A,B,C)</option>
+        <option value="XOR3">XOR3: OUT=A⊕B⊕C</option>
+      </select>
+    </div>
+    <div class="row">
+      <label>Fusion threshold <span class="val" id="thrVal"></span></label>
+      <input type="range" id="thr" min="0.05" max="0.9" step="0.01" value="0.42">
+    </div>
+    <div class="row small">
+      <label>Fusion weights</label>
+      <select id="wPreset">
+        <option value="balanced" selected>Balanced</option>
+        <option value="railHeavy">Rail-heavy</option>
+        <option value="semHeavy">Semantic-heavy</option>
+        <option value="rgbHeavy">RGB-heavy</option>
+      </select>
+    </div>
+
+    <div class="hr"></div>
+    <h2>Predictive Modeling</h2>
+    <label class="inline"><input type="checkbox" id="predEnable"> Enable predictive blending</label>
+    <div class="row small">
+      <label>Predict blend λ <span class="val" id="predLambdaVal"></span></label>
+      <input type="range" id="predLambda" min="0" max="1" step="0.05" value="0.30">
+    </div>
+    <div class="row small">
+      <label>Horizon Δt <span class="val" id="predHVal"></span></label>
+      <input type="range" id="predHorizon" min="1" max="4" step="1" value="1">
+    </div>
+    <div class="row small">
+      <label>EMA α <span class="val" id="predAlphaVal"></span></label>
+      <input type="range" id="predAlpha" min="0.2" max="0.8" step="0.05" value="0.50">
+    </div>
+    <label class="inline small"><input type="checkbox" id="predOverlay" checked> Overlay predicted rails (2D)</label>
+    <div class="kvs small">
+      <div>Pred MSE (rails)</div><div class="mono" id="predMseRail">–</div>
+      <div>Pred MSE (semantic)</div><div class="mono" id="predMseSem">–</div>
+    </div>
+
+    <div class="hr"></div>
+    <h2>TSP Solver</h2>
+    <label class="inline"><input type="checkbox" id="tspEnable" checked> Enable TSP</label>
+    <div class="row small">
+      <label>Cities <span class="val" id="cityVal"></span></label>
+      <input type="range" id="cities" min="6" max="160" step="2" value="40">
+    </div>
+    <div class="row small">
+      <label>Model</label>
+      <select id="costModel">
+        <option value="EUCLID">Euclidean</option>
+        <option value="RAIL">Rail-biased</option>
+        <option value="SEM">Semantic-biased</option>
+        <option value="MIX" selected>Mixed</option>
+      </select>
+    </div>
+    <div class="row small">
+      <label>Precision</label>
+      <select id="precision">
+        <option value="AUTO" selected>Auto</option>
+        <option value="MACRO">Macro</option>
+        <option value="MESO">Meso</option>
+        <option value="MICRO">Micro/Atomic</option>
+      </select>
+    </div>
+    <div class="row small">
+      <label>Atomic range (px) <span class="val" id="atomicVal"></span></label>
+      <input type="range" id="atomicRange" min="1" max="12" step="1" value="5">
+    </div>
+    <label class="inline small"><input type="checkbox" id="domainDynamic" checked> Dynamic domain</label>
+
+    <h3 class="small">NNM Allocation</h3>
+    <label class="inline small"><input type="checkbox" id="autoNNM" checked> Auto (let solver decide)</label>
+    <div class="row small">
+      <label>Macro NNMs <span class="val" id="macroVal"></span></label>
+      <input type="range" id="macroNNM" min="1" max="64" step="1" value="8">
+    </div>
+    <div class="row small">
+      <label>Micro NNMs <span class="val" id="microVal"></span></label>
+      <input type="range" id="microNNM" min="8" max="512" step="8" value="128">
+    </div>
+    <div class="row small">
+      <label>Steps / frame <span class="val" id="spfVal"></span></label>
+      <input type="range" id="stepsPerFrame" min="10" max="2000" step="10" value="400">
+    </div>
+    <div class="twocol">
+      <button id="tspReseed">Reseed cities</button>
+      <button id="tspRestart">Restart solver</button>
+    </div>
+    <div class="kvs small">
+      <div>Tour length</div><div class="mono" id="tspLen">–</div>
+      <div>Best length</div><div class="mono" id="tspBest">–</div>
+      <div>Accepted swaps</div><div class="mono" id="tspAcc">–</div>
+      <div>Attempts</div><div class="mono" id="tspAtt">–</div>
+      <div>Precision now</div><div class="mono" id="precNow">–</div>
+    </div>
+    <label class="inline small"><input type="checkbox" id="topkEnable" checked> Multi-hypothesis Top-K</label>
+    <div class="row small">
+      <label>Top-K candidates <span class="val" id="topkVal"></span></label>
+      <input type="range" id="topk" min="2" max="16" step="1" value="6">
+    </div>
+
+    <div class="hr"></div>
+    <h2>AGPRC (NSGA-II)</h2>
+    <label class="inline"><input type="checkbox" id="agprcEnable"> Enable evolution (Pareto)</label>
+    <div class="row small">
+      <label>Population <span class="val" id="popVal"></span></label>
+      <input type="range" id="pop" min="8" max="60" step="2" value="20">
+    </div>
+    <div class="row small">
+      <label>Evals / frame <span class="val" id="evalVal"></span></label>
+      <input type="range" id="evals" min="1" max="200" step="1" value="40">
+    </div>
+    <label class="inline small"><input type="checkbox" id="frontOverlay" checked> Overlay Front-0 on 2D</label>
+    <div class="row small">
+      <label>Front-0 samples <span class="val" id="frontNVal"></span></label>
+      <input type="range" id="frontN" min="1" max="20" step="1" value="6">
+    </div>
+    <div class="kvs small">
+      <div>Front-0 size</div><div class="mono" id="front0">–</div>
+      <div>Last Pareto Δ</div><div class="mono" id="paretoDelta">–</div>
+    </div>
+
+    <div class="hr"></div>
+    <h2>Self-Optimization</h2>
+    <label class="inline"><input type="checkbox" id="soEnable"> Enable self-optimizer</label>
+    <div class="row small">
+      <label>Objective</label>
+      <select id="soObjective">
+        <option value="AVG">Avg tour length</option>
+        <option value="PERF">Performance (FPS)</option>
+        <option value="BAL" selected>Balanced</option>
+      </select>
+    </div>
+    <div class="row small">
+      <label>Balanced: Perf weight <span class="val" id="soBalVal"></span></label>
+      <input type="range" id="soBalance" min="0" max="1" step="0.05" value="0.5">
+    </div>
+    <div class="row small">
+      <label>Trial interval (s) <span class="val" id="soIntVal"></span></label>
+      <input type="range" id="soInterval" min="0.5" max="4" step="0.25" value="1.5">
+    </div>
+    <div class="row small">
+      <label>Tweak amplitude <span class="val" id="soAmpVal"></span></label>
+      <input type="range" id="soExplore" min="0" max="1" step="0.05" value="0.30">
+    </div>
+    <div class="row small">
+      <label>Exploration ε <span class="val" id="soEpsVal"></span></label>
+      <input type="range" id="soEps" min="0" max="0.5" step="0.01" value="0.15">
+    </div>
+    <div class="twocol">
+      <button id="soUseBest">Apply best</button>
+      <button id="soReset">Reset optimizer</button>
+    </div>
+    <div class="kvs small">
+      <div>Status</div><div class="mono" id="soStatus">idle</div>
+      <div>Last score</div><div class="mono" id="soScore">–</div>
+      <div>Best score</div><div class="mono" id="soBest">–</div>
+      <div>Best params</div><div class="mono" id="soParams">–</div>
+    </div>
+
+    <div class="hr"></div>
+    <h2>Scheduler</h2>
+    <label class="inline small"><input type="checkbox" id="schedOverlay" checked> Show Morton scheduling overlay</label>
+    <label class="inline small"><input type="checkbox" id="bitonicProof" checked> Bitonic proof overlay</label>
+    <div class="kvs small">
+      <div>Bitonic stages</div><div class="mono" id="stageCount">–</div>
+      <div>Live swaps</div><div class="mono" id="swapCount">–</div>
+    </div>
+
+    <div class="hr"></div>
+    <h2>REQ/ACK Protocol</h2>
+    <label class="small inline"><input type="checkbox" id="protoEnable" checked> Enable REQ/ACK</label>
+    <div class="row small">
+      <label>Start prob / tile <span class="val" id="protoStartVal"></span></label>
+      <input type="range" id="protoStart" min="0" max="0.05" step="0.001" value="0.01">
+    </div>
+    <div class="row small">
+      <label>Fault drop (%) <span class="val" id="faultVal"></span></label>
+      <input type="range" id="faultPct" min="0" max="50" step="1" value="5">
+    </div>
+    <label class="small inline"><input type="checkbox" id="protoOverlay" checked> Show REQ/ACK links (2D)</label>
+    <div class="kvs small" style="margin-top:6px">
+      <div>Handshakes</div><div class="mono" id="hsCount">0</div>
+      <div>REQ↑</div><div class="mono" id="reqEdges">0</div>
+      <div>ACK↑</div><div class="mono" id="ackEdges">0</div>
+    </div>
+
+    <div class="hr"></div>
+    <!-- Performance governor -->
+    <h2>Performance</h2>
+    <label class="inline"><input type="checkbox" id="ecoMode" checked> Eco mode (adaptive throttling)</label>
+    <div class="kvs small">
+      <div>Governor</div><div class="mono" id="govStatus">init</div>
+    </div>
+  </div>
+
+  <div class="canvwrap">
+    <div>
+      <canvas id="c2d" width="512" height="512"></"></canvas>
+      <div class="legend">2D Texture Sheet (RGB). Overlays: scheduler, DomainMask colors, cτ, bitonic, REQ/ACK, AGPRC tours, TSP tour, <b>Predicted rails</b>.</div>
+    </div>
+    <div>
+      <canvas id="c3d" width="512" height="512"></canvas>
+      <div class="legend">3D Semantic Space (Q,P,S → x,y,z) with node graph; TSP edges (cyan) & trails (gold).</div>
+    </div>
+  </div>
+</div>
+
+<script>
+(function(){
+  // ---------- Core grid ----------
+  const W=64,H=64,TILE=8, TX=W/TILE, TY=H/TILE, NT=TX*TY;
+  const CH={R:0,G:1,B:2,Q:3,P:4,S:5};
+  const EPS=1e-6;
+
+  // ---------- UI refs ----------
+  const el=id=>document.getElementById(id);
+  const c2d=el('c2d'), g2d=c2d.getContext('2d');
+  const c3d=el('c3d'), g3d=c3d.getContext('2d');
+  el('sz').textContent=`${W} × ${H} (tiles ${TX}×${TY})`;
+
+  // Shortcuts
+  const on=(e,def=false)=> (e && typeof e.checked==='boolean') ? e.checked : def;
+  const numVal=(e,def=0)=> (e && e.value!=null) ? +e.value : def;
+  const clamp01=v=>Math.max(0,Math.min(1,v));
+  const lerp=(a,b,t)=>a+(b-a)*t;
+  const hann=t=>(t<=1)?0.5*(1+Math.cos(Math.PI*t)):0;
+  const idx=(x,y)=>(((y%H)+H)%H)*W + (((x%W)+W)%W);
+  const tIdx=(tx,ty)=>(((ty%TY)+TY)%TY)*TX + (((tx%TX)+TX)%TX);
+  const get=(i,ch)=>sheet[i*6+ch];
+  const set=(i,ch,v)=>sheet[i*6+ch]=v;
+  const hash2=(x,y)=>{ let h=(x*374761393 ^ y*668265263)>>>0; h=(h^(h>>>13))*1274126177>>>0; return h>>>0; };
+  function forEachPixel(f){ for(let y=0;y<H;y++) for(let x=0;x<W;x++) f(x,y,idx(x,y)); }
+
+  // ---------- Perf governor ----------
+  const PERF = { eco:true, targetFPS:58, workScale:1, draw3DSkip:1, predPeriod:1, rebuildPeriod:16 };
+  function perfUpdateGovernor(){
+    const eco = on(el('ecoMode'), true); PERF.eco = eco;
+    if(!eco){ PERF.workScale=1; PERF.draw3DSkip=1; PERF.predPeriod=1; PERF.rebuildPeriod=16; const g=el('govStatus'); if(g) g.textContent='off'; return; }
+    const f = fpsNow || 60;
+    const err = PERF.targetFPS - f;
+    const scale = clamp01(1 - Math.max(0, err)/PERF.targetFPS);
+    PERF.workScale = 0.35 + 0.65*scale;
+    PERF.draw3DSkip = (f<40)?3 : (f<55)?2 : 1;
+    PERF.predPeriod = (f<45)?4 : (f<55)?2 : 1;
+    PERF.rebuildPeriod = (f<45)?32 : (f<55)?24 : 16;
+    const g=el('govStatus'); if(g) g.textContent =
+      `scale=${PERF.workScale.toFixed(2)}  3D÷${PERF.draw3DSkip}  pred÷${PERF.predPeriod}  rfRebuild=${PERF.rebuildPeriod}`;
+  }
+
+  // ---------- Fusion presets ----------
+  const PRESETS={balanced:{wRail:0.40,wSem:0.25,wRGB:0.20,wTile:0.10,wCoh:0.05},
+                 railHeavy:{wRail:0.60,wSem:0.15,wRGB:0.10,wTile:0.10,wCoh:0.05},
+                 semHeavy:{wRail:0.45,wSem:0.35,wRGB:0.10,wTile:0.05,wCoh:0.05},
+                 rgbHeavy:{wRail:0.25,wSem:0.15,wRGB:0.45,wTile:0.10,wCoh:0.05}};
+  let FW={...PRESETS.balanced};
+
+  // ---------- Data arrays ----------
+  const sheet=new Float32Array(W*H*6);     // RGB + QPS
+  const rails=new Uint8Array(W*H);         // 0=open, 1=X,2=Y,3=Z
+  let prevRails=new Uint8Array(rails);
+  const railField=new Float32Array(W*H*3); // smoothed rails lanes
+  const edgeMap=new Float32Array(W*H);
+  const orient=new Uint8Array(W*H);
+
+  // Perf: incremental rail updates
+  let lastFlipsIdx = [];
+  const kerCache = new Map();
+  function kernelForR(R){
+    if(kerCache.has(R)) return kerCache.get(R);
+    const ker=[]; for(let dy=-R;dy<=R;dy++) for(let dx=-R;dx<=R;dx++){
+      const d=Math.hypot(dx,dy); if(d<=R) ker.push([dx,dy,hann(d/R)]);
+    }
+    kerCache.set(R,ker); return ker;
+  }
+
+  // Gates & Domains
+  const gateTile=new Uint8Array(NT);
+  const domainMask=new Uint8Array(NT); // bits: RGB,QP,S,rails
+  let writesAllowed=0,writesGated=0,writesClamped=0;
+
+  // Residual / cτ / energy / hist
+  const residQ=new Float32Array(NT), residP=new Float32Array(NT), residS=new Float32Array(NT);
+  const cTau=new Float32Array(NT);
+  const regEnergyTile=new Float32Array(NT);
+  const microHistBins=new Uint32Array(8);
+
+  // Scheduler
+  const tileActive=new Uint8Array(NT);
+  const bitBias=new Float32Array(NT);
+  let swapCountLive=0, stageCountVal=0;
+
+  // Logic
+  const tileA=new Uint8Array(NT), tileB=new Uint8Array(NT), tileC=new Uint8Array(NT);
+  const tileSUM=new Uint8Array(NT), tileCAR=new Uint8Array(NT);
+  const tilePos=new Float32Array(NT*3);
+  const tileFlow=new Uint8Array(NT);
+
+  // Trails
+  const trailEdges=[]; const MAX_TRAILS=1400;
+  const rayEdges=[]; const MAX_RAY_EDGES=1600;
+
+  // ---------- TSP ----------
+  const TSP={
+    enabled:true,N:40,cities:[],tour:[],len:0,best:Infinity,accepted:0,attempts:0,
+    model:'MIX',precision:'AUTO',microRange:5,dynamic:true,macros:8,micros:128,
+    autoNNM:true,stepsPerFrame:400,history:[], topkN:6, topkLast:0
+  };
+
+  // AGPRC
+  const AG={enabled:false, pop:20, evals:40, inds:[], front0:0, lastDelta:0};
+
+  // ---------- Q2 ----------
+  let q2Tokens=[]; let q2CapBytes=16*1024;
+  const Q2_TYPE={TINY2:0, UINT3:1, SYM3:2, NEST:3};
+  const Q2_CLASS={Flip:1, Req:4, Ack:5, Hs:6, TSPImprove:11, TopK:12, AGPick:13, CRCok:14, CRCbad:15, cTau:16, Resid:17};
+  const q2ClassHist=new Map();
+  function q2PushTok(t){ q2Tokens.push(t&3); }
+  function q2EmitBase3(n){ if(n===0){ q2PushTok(0); q2PushTok(3); return; } let d=[]; while(n>0){ d.push(n%3); n=Math.floor(n/3);} for(const v of d) q2PushTok(v); q2PushTok(3);}
+  function q2EmitKey(key){ q2EmitBase3(key+1); }
+  function q2BumpClass(c){ q2ClassHist.set(c,(q2ClassHist.get(c)||0)+1); }
+  function q2PackBytes(){ const bytes=new Uint8Array(Math.ceil(q2Tokens.length/4)); for(let i=0;i<q2Tokens.length;i++){ const lane=i&3, bi=i>>2; bytes[bi]|=(q2Tokens[i]&3)<<((3-lane)*2); } return bytes; }
+  function q2CodonString(){ const bytes=q2PackBytes(); return [...bytes].map(b=>b.toString(16).padStart(2,'0')).join(' '); }
+  function q2UpdatePreview(){
+    const bytes=q2PackBytes();
+    const hex=[...bytes].slice(0,256).map(b=>b.toString(16).padStart(2,'0')).join(' ');
+    const elTok=el('q2Tok'); if(elTok) elTok.textContent=q2Tokens.length.toString();
+    const elBytes=el('q2Bytes'); if(elBytes) elBytes.textContent=bytes.length.toString();
+    const elCod=el('q2Codons'); if(elCod) elCod.textContent=(q2Tokens.length).toString();
+    const elPrev=el('q2Preview'); if(elPrev) elPrev.textContent=bytes.length?hex:'(empty)';
+    const kv=[...q2ClassHist.entries()].sort((a,b)=>b[1]-a[1]).slice(0,12).map(([k,v])=>`${k}:${v}`).join('  ');
+    const elHist=el('q2Hist'); if(elHist) elHist.textContent=kv||'(empty)';
+  }
+  function q2EmitFlip(x,y,a,b,axisKey){
+    if(!on(el('q2Enable'))) return;
+    if(a===b) return;
+    let TYPE, value;
+    if((a===0&&b>0)||(b===0&&a>0)){ TYPE=Q2_TYPE.TINY2; value=(b>0)?1:0; }
+    else{ TYPE=Q2_TYPE.SYM3; const s=Math.min(a,b), t=Math.max(a,b); value=(s===1&&t===2)?1:(s===2&&t===3)?2:3; }
+    q2EmitKey(axisKey); q2PushTok(TYPE); (TYPE===Q2_TYPE.TINY2)?q2PushTok(value):q2EmitBase3(value);
+    if(on(el('q2Morton'))){ q2EmitKey(7); q2PushTok(Q2_TYPE.UINT3); q2EmitBase3(mortonXY(x,y)); }
+    q2EmitKey(6); q2PushTok(Q2_TYPE.UINT3); q2EmitBase3(tickCount%81);
+    q2BumpClass(Q2_CLASS.Flip);
+  }
+  function q2EmitClass(cls, pairs=[]){
+    if(!on(el('q2Enable'))) return;
+    q2EmitKey(5); q2PushTok(Q2_TYPE.SYM3); q2EmitBase3(cls);
+    for(const [k,type,val] of pairs){ q2EmitKey(k); q2PushTok(type); if(type===Q2_TYPE.TINY2) q2PushTok(val); else q2EmitBase3(val); }
+    q2BumpClass(cls);
+  }
+  function part1by1(n){ n&=0xFFFF; n=(n^(n<<8))&0x00FF00FF; n=(n^(n<<4))&0x0F0F0F0F; n=(n^(n<<2))&0x33333333; n=(n^(n<<1))&0x55555555; return n;}
+  function mortonXY(x,y){ return (part1by1(y)<<1)|part1by1(x); }
+
+  // ---------- Seeders / fields ----------
+  function seedFromString(s){ let h=2166136261>>>0; for(let i=0;i<s.length;i++){ h^=s.charCodeAt(i); h=(h*16777619)>>>0; } return ()=>{ h^=h<<13; h^=h>>>17; h^=h<<5; return (h>>>0)/4294967295; }; }
+  function writePayloadIntoS(text){
+    const rnd=seedFromString(text||"BNP"); const w=16,h=16, ox=4, oy=4;
+    for(let yy=0;yy<h;yy++) for(let xx=0;xx<w;xx++){
+      const i=idx((ox+xx)%W,(oy+yy)%H); const bit = rnd()>0.5?1:0; set(i,CH.S, clamp01(get(i,CH.S) + 0.25*bit));
+    }
+  }
+  function computeEdgeAndOrientation(){
+    let maxMag=1e-6;
+    forEachPixel((x,y,i)=>{
+      const xr=(x+1)%W, xl=(x-1+W)%W, yu=(y-1+H)%H, yd=(y+1)%H;
+      const dQdx=(get(idx(xr,y),CH.Q)-get(idx(xl,y),CH.Q))*0.5;
+      const dQdy=(get(idx(x,yu),CH.Q)-get(idx(x,yd),CH.Q))*0.5;
+      const dPdx=(get(idx(xr,y),CH.P)-get(idx(xl,y),CH.P))*0.5;
+      const dPdy=(get(idx(x,yu),CH.P)-get(idx(x,yd),CH.P))*0.5;
+      const dSdx=(get(idx(xr,y),CH.S)-get(idx(xl,y),CH.S))*0.5;
+      const dSdy=(get(idx(x,yu),CH.S)-get(idx(x,yd),CH.S))*0.5;
+      const dxm=Math.abs(dQdx)+Math.abs(dPdx)+Math.abs(dSdx);
+      const dym=Math.abs(dQdy)+Math.abs(dPdy)+Math.abs(dSdy);
+      const mag=Math.hypot(dxm,dym); edgeMap[i]=mag; if(mag>maxMag) maxMag=mag;
+      orient[i]=(Math.abs(dxm-dym)<0.02)?3:((dxm>dym)?1:2);
+    });
+    const inv=1/maxMag; for(let k=0;k<edgeMap.length;k++) edgeMap[k]=Math.min(1,edgeMap[k]*inv);
+  }
+  function buildMeaningful(){
+    const A={x:16,y:18,col:[1,0.2,0.2]}, B={x:48,y:22,col:[0.2,1,0.2]}, C={x:28,y:48,col:[0.2,0.2,1]};
+    const sigma=18, inv2s2=1/(2*sigma*sigma);
+    forEachPixel((x,y,i)=>{
+      const dA=(x-A.x)**2+(y-A.y)**2, dB=(x-B.x)**2+(y-B.y)**2, dC=(x-C.x)**2+(y-C.y)**2;
+      let wA=Math.exp(-dA*inv2s2), wB=Math.exp(-dB*inv2s2), wC=Math.exp(-dC*inv2s2);
+      const s=wA+wB+wC; wA/=s; wB/=s; wC/=s;
+      set(i,CH.Q,wA); set(i,CH.P,wB); set(i,CH.S,clamp01(wC));
+      const r=wA*A.col[0]+wB*B.col[0]+wC*C.col[0], g=wA*A.col[1]+wB*B.col[1]+wC*C.col[1], b=wA*A.col[2]+wB*B.col[2];
+      set(i,CH.R,clamp01(r)); set(i,CH.G,clamp01(g)); set(i,CH.B,clamp01(b)); rails[i]=0;
+    });
+    writePayloadIntoS(el('payload')?.value||"BNP");
+    computeEdgeAndOrientation();
+    forEachPixel((x,y,i)=>{ const e=edgeMap[i]; if(e>0.25 && Math.random()<0.35*e){ rails[i]=orient[i]; } });
+  }
+  function buildRandom(){
+    forEachPixel((x,y,i)=>{
+      const r=(Math.sin(x*12.9898+y*78.233)*43758.5453)%1;
+      const g=(Math.sin(x*4.12+y*19.11+11.3)*9983.1)%1;
+      const b=(Math.sin(x*7.77+y*5.55+3.3)*6007.7)%1;
+      set(i,CH.R,clamp01(r<0?r+1:r)); set(i,CH.G,clamp01(g<0?g+1:g)); set(i,CH.B,clamp01(b<0?b+1:b));
+      set(i,CH.Q,Math.random()); set(i,CH.P,Math.random()); set(i,CH.S,Math.random());
+      rails[i]=(Math.random()<0.03)?(1+(Math.random()*3|0)):0;
+    });
+    for(let k=0;k<edgeMap.length;k++){ edgeMap[k]=0; orient[k]=((k&1)?1:2); }
+  }
+
+  // ---------- Quadrants/DomainMask ----------
+  function reseedGates(){
+    const cov=numVal(el('gateCov')||{value:60},60)/100;
+    for(let ty=0;ty<TY;ty++) for(let tx=0;tx<TX;tx++){
+      const r=(hash2(tx,ty)%1000)/1000; gateTile[tIdx(tx,ty)] = (r<cov)?1:0;
+    }
+    const gcv=el('gateCovVal'); if(gcv) gcv.textContent = Math.round(cov*100)+'%';
+  }
+  function reseedQuadrants(){
+    for(let ty=0;ty<TY;ty++) for(let tx=0;tx<TX;tx++){
+      const t=tIdx(tx,ty); const r=(hash2(tx*17,ty*29)%1000)/1000;
+      let mask=0b0001; if(r<0.33) mask=0b0111; else if(r<0.66) mask=0b0011; else mask=0b0101;
+      domainMask[t]=mask;
+    }
+    writesAllowed=writesGated=writesClamped=0;
+  }
+  function gateAtPixel(i){
+    const ge=el('gateEnable'); if(!on(ge,true)) return 1;
+    const x=i%W, y=(i/W)|0, tx=(x/TILE)|0, ty=(y/TILE)|0; return gateTile[tIdx(tx,ty)];
+  }
+  function tileMask(t){ return on(el('quadEnable'),true) ? domainMask[t] : 0b1111; }
+
+  function applyDomain(oldVal,newVal,i,chBit){
+    const g=gateAtPixel(i);
+    const t=tIdx(((i%W)/TILE)|0, (((i/W)|0)/TILE)|0);
+    const mask=tileMask(t);
+    if(!g){ writesGated++; return oldVal; }
+    if(chBit===0 && !(mask&1)){ writesClamped++; return oldVal; }
+    if(chBit===1 && !(mask&2)){ writesClamped++; return oldVal; }
+    if(chBit===2 && !(mask&4)){ writesClamped++; return oldVal; }
+    writesAllowed++; return newVal;
+  }
+
+  // ---------- Rails / flips ----------
+  let flipsLast=0, eventsLast=0, tickCount=0;
+
+  // PERF: record flips, reuse prevRails buffer
+  function meaningfulFlips(baseProb,biasMul){
+    flipsLast=0; prevRails.set(rails);
+    lastFlipsIdx.length = 0;
+    forEachPixel((x,y,i)=>{
+      const p = baseProb * (0.25 + biasMul * edgeMap[i]);
+      if(Math.random()<p){
+        const prev=rails[i]; let v = (prev!==0) ? 0 : orient[i]; if(v===0) v=1+(Math.random()*3|0);
+        if(on(el('gateEnable'),true) && on(el('gateRails')||{checked:true},true) && !gateAtPixel(i)) v=prev;
+        if(v!==prev){ rails[i]=v; flipsLast++; lastFlipsIdx.push(i); }
+      }
+    });
+  }
+
+  // PERF: full and incremental rail field
+  function buildRailFieldFull(R){
+    railField.fill(0); let events=0;
+    const ker = kernelForR(R);
+    forEachPixel((x,y,i)=>{
+      const r=rails[i]; if(!r) return; events++; const lane=r-1;
+      for(const [dx,dy,w] of ker){ const j=idx(x+dx,y+dy); railField[j*3+lane]+=w; }
+    });
+    let maxw=1; for(let k=0;k<railField.length;k++) if(railField[k]>maxw) maxw=railField[k];
+    const inv=1/maxw; for(let k=0;k<railField.length;k++) railField[k]*=inv; eventsLast=events;
+  }
+  function buildRailField(r){
+    if(!PERF.eco){ buildRailFieldFull(r); return; }
+    if((tickCount % PERF.rebuildPeriod)===0 || lastFlipsIdx.length > (W*H*0.02)){
+      buildRailFieldFull(r); return;
+    }
+    const ker = kernelForR(r);
+    for(const i of lastFlipsIdx){
+      const x=i%W, y=(i/W)|0;
+      const oldR = prevRails[i], newR = rails[i];
+      if(oldR){ const lane=oldR-1; for(const [dx,dy,w] of ker){ const j=idx(x+dx,y+dy); railField[j*3+lane] = Math.max(0, railField[j*3+lane] - w); } }
+      if(newR){ const lane=newR-1; for(const [dx,dy,w] of ker){ const j=idx(x+dx,y+dy); railField[j*3+lane] += w; } }
+    }
+    // Clamp around edited neighborhoods
+    for(const i of lastFlipsIdx){
+      const x=i%W, y=(i/W)|0;
+      for(let dy=-r;dy<=r;dy++) for(let dx=-r;dx<=r;dx++){
+        const j=idx(x+dx,y+dy), b=j*3;
+        railField[b+0]=clamp01(railField[b+0]);
+        railField[b+1]=clamp01(railField[b+1]);
+        railField[b+2]=clamp01(railField[b+2]);
+      }
+    }
+    eventsLast = Math.max(0, eventsLast) + lastFlipsIdx.length;
+  }
+
+  // ---------- BitBias & scheduler ----------
+  function computeBitBias(){
+    for(let ty=0;ty<TY;ty++){
+      for(let tx=0;tx<TX;tx++){
+        let mag=0, lSum=0, l2Sum=0, eSum=0, c=0;
+        for(let y=0;y<TILE;y++) for(let x=0;x<TILE;x++){
+          const i=idx(tx*TILE+x,ty*TILE+y);
+          const r=sheet[i*6+CH.R], g=sheet[i*6+CH.G], b=sheet[i*6+CH.B];
+          const L=0.2126*r+0.7152*g+0.0722*b; lSum+=L; l2Sum+=L*L;
+          eSum+=edgeMap[i];
+          mag+=railField[i*3+0]+railField[i*3+1]+railField[i*3+2]; c++;
+        }
+        mag/=c; eSum/=c; const meanL=lSum/c; const varL=Math.max(0,l2Sum/c-meanL*meanL);
+        const coh=clamp01(1-2.2*Math.sqrt(varL));
+        bitBias[tIdx(tx,ty)]=clamp01(0.5*mag + 0.25*coh + 0.25*eSum);
+      }
+    }
+  }
+  function bitonicSortIdxDesc(arrScores){
+    let idxs=Array.from({length:NT},(_,i)=>i); let n=1; while(n<idxs.length) n<<=1;
+    while(idxs.length<n) idxs.push(idxs[idxs.length-1]);
+    swapCountLive=0; stageCountVal=0;
+    function compare(i,j,dir){
+      const a=idxs[i], b=idxs[j];
+      const sa=arrScores[a], sb=arrScores[b];
+      const swap = dir ? (sa<sb) : (sa>sb);
+      if(swap){ const t=idxs[i]; idxs[i]=idxs[j]; idxs[j]=t; swapCountLive++; }
+    }
+    function merge(lo,cnt,dir){ if(cnt>1){ const k=cnt>>1; for(let i=lo;i<lo+cnt-k;i++) compare(i,i+k,dir); merge(lo,k,dir); merge(lo+k,k,dir); } }
+    function sort(lo,cnt,dir){ if(cnt>1){ const k=cnt>>1; sort(lo,k,true); sort(lo+k,k,false); stageCountVal++; merge(lo,cnt,dir);} }
+    sort(0,n,true); return idxs.slice(0,NT);
+  }
+  function scheduleTiles(){
+    computeBitBias();
+    const order=bitonicSortIdxDesc(bitBias);
+    const K=Math.max(1, Math.floor(NT*0.6));
+    for(let t=0;t<NT;t++) tileActive[t]=0; for(let k=0;k<K;k++) tileActive[order[k]]=1;
+    el('stageCount').textContent=stageCountVal.toString(); el('swapCount').textContent=swapCountLive.toString();
+  }
+
+  // ---------- Logic fusion (FIXED) ----------
+  function evalLogicTierAware(){
+    if(!on(el('logicEnable'),true)) return;
+    const T=numVal(el('thr'),0.42);
+
+    for(let ty=0; ty<TY; ty++){
+      for(let tx=0; tx<TX; tx++){
+        let rx=0, ry=0, rz=0, mag=0;
+        let rA=0, gA=0, bA=0, qA=0, pA=0, sA=0;
+        let lSum=0, l2Sum=0, count=0;
+
+        for(let y=0;y<TILE;y++){
+          for(let x=0;x<TILE;x++){
+            const i=idx(tx*TILE+x, ty*TILE+y);
+
+            const r=get(i,CH.R), g=get(i,CH.G), b=get(i,CH.B);
+            const q=get(i,CH.Q), p=get(i,CH.P), s=get(i,CH.S);
+
+            rA+=r; gA+=g; bA+=b; qA+=q; pA+=p; sA+=s;
+
+            const L=0.2126*r+0.7152*g+0.0722*b;
+            lSum+=L; l2Sum+=L*L;
+
+            const fx=railField[i*3+0], fy=railField[i*3+1], fz=railField[i*3+2];
+            rx+=fx; ry+=fy; rz+=fz; mag+=fx+fy+fz;
+
+            count++;
+          }
+        }
+
+        if(count===0) count=1;
+        const inv=1/count;
+
+        rx*=inv; ry*=inv; rz*=inv;
+        mag=clamp01(mag*(inv/1.5));  // soften magnitude
+
+        rA*=inv; gA*=inv; bA*=inv; qA*=inv; pA*=inv; sA*=inv;
+
+        const meanL=lSum*inv;
+        const varL=Math.max(0, l2Sum*inv - meanL*meanL);
+        const coh=clamp01(1-2.2*Math.sqrt(varL));
+
+        const rgbSum=rA+gA+bA+EPS;
+        const rgbDomA=clamp01(rA/rgbSum), rgbDomB=clamp01(gA/rgbSum), rgbDomC=clamp01(bA/rgbSum);
+
+        const aSoft = clamp01(FW.wRail*rx + FW.wRGB*rgbDomA + FW.wSem*qA + FW.wTile*mag + FW.wCoh*coh);
+        const bSoft = clamp01(FW.wRail*ry + FW.wRGB*rgbDomB + FW.wSem*pA + FW.wTile*mag + FW.wCoh*coh);
+        const cSoft = clamp01(FW.wRail*rz + FW.wRGB*rgbDomC + FW.wSem*sA + FW.wTile*mag + FW.wCoh*coh);
+
+        const iTile=tIdx(tx,ty);
+        tileA[iTile]=(aSoft>=T)?1:0;
+        tileB[iTile]=(bSoft>=T)?1:0;
+        tileC[iTile]=(cSoft>=T)?1:0;
+
+        // outputs for FA/HA/MAJ can be derived later if you want to show SUM/CARRY
+        // (kept here for future use)
+        tileSUM[iTile] = (tileA[iTile]^tileB[iTile]) ^ tileC[iTile];
+        const maj = (tileA[iTile]+tileB[iTile]+tileC[iTile])>=2 ? 1:0;
+        tileCAR[iTile] = maj;
+
+        // Directional flow follows dominant rail lane
+        const m = Math.max(rx, ry, rz);
+        tileFlow[iTile] = (m===rx)?1:(m===ry)?2:3;
+
+        // Semantic position for 3D map
+        tilePos[iTile*3+0]=qA; tilePos[iTile*3+1]=pA; tilePos[iTile*3+2]=sA;
+      }
+    }
+  }
+
+  // ---------- cτ & Interpreter ----------
+  function reseedCTau(){
+    for(let t=0;t<NT;t++){ cTau[t]=0.5 + 1.0*(hash2(t,~t)%1000)/1000 * numVal(el('ctauAmp'),0.5); }
+  }
+  function microInterpreterStep(steps){
+    if(!on(el('intpEnable'),true)) return;
+    microHistBins.fill(0);
+    let regEnergyAcc=0;
+    for(let t=0;t<NT;t++){
+      if(!tileActive[t]) continue;
+      const tx=t%TX, ty=(t/TX)|0;
+      let qA=0,pA=0,sA=0,c=0;
+      for(let y=0;y<TILE;y++) for(let x=0;x<TILE;x++){ const i=idx(tx*TILE+x,ty*TILE+y); qA+=get(i,CH.Q); pA+=get(i,CH.P); sA+=get(i,CH.S); c++; }
+      qA/=c; pA/=c; sA/=c;
+      let r0=qA, r1=pA, r2=sA, r3=1;
+      const ct=cTau[t]||1;
+      const iters=Math.max(1, Math.floor(steps*ct));
+      for(let u=0;u<iters;u++){
+        r0 = clamp01(r0 + 0.15*(r1 - r0));
+        r1 = clamp01(r1 + 0.12*(r2 - r1));
+        const k0=0.8, k1=0.5, k2=0.3;
+        const d0=r0*k0 + r1*(1-k0), d1=r0*k1 + r1*(1-k1), d2=r0*k2 + r1*(1-k2);
+        const ex0=Math.exp(d0), ex1=Math.exp(d1), ex2=Math.exp(d2), Z=ex0+ex1+ex2;
+        const att0=ex0/Z, att1=ex1/Z, att2=ex2/Z;
+        r2 = clamp01( r2*0.85 + 0.15*(att0*qA + att1*pA + att2*sA) );
+      }
+      if(on(el('privS'),true)){
+        if((tileMask(t)&4)===0){ /* no write */ }
+        else{
+          for(let y=0;y<TILE;y++) for(let x=0;x<TILE;x++){
+            const i=idx(tx*TILE+x,ty*TILE+y);
+            const cur=get(i,CH.S), nv=lerp(cur, r2, 0.10);
+            set(i,CH.S, applyDomain(cur,nv,i,2));
+          }
+          q2EmitClass(Q2_CLASS.cTau, [[6,Q2_TYPE.UINT3,tickCount%81]]);
+        }
+      }
+      const e = r0*r0 + r1*r1 + r2*r2 + r3*r3;
+      regEnergyTile[t]=e; regEnergyAcc+=e;
+      const bin=Math.max(0,Math.min(7,Math.floor((iters-1)/4))); microHistBins[bin]++;
+    }
+    el('regEnergy').textContent=(regEnergyAcc/Math.max(1,NT)).toFixed(3);
+    el('microHist').textContent=[...microHistBins].join(',');
+  }
+
+  // ---------- Residual promotion ----------
+  function residualPromote(){
+    if(!on(el('resEnable'),true)) return;
+    for(let t=0;t<NT;t++){
+      if(bitBias[t]>0.6){
+        const tx=t%TX, ty=(t/TX)|0;
+        let sx=0,sy=0,sz=0,c=0;
+        for(let y=0;y<TILE;y++) for(let x=0;x<TILE;x++){
+          const i=idx(tx*TILE+x,ty*TILE+y); sx+=railField[i*3+0]; sy+=railField[i*3+1]; sz+=railField[i*3+2]; c++;
+        }
+        sx/=c; sy/=c; sz/=c;
+        residQ[t]=clamp01(residQ[t] + 0.02*(sx-0.5));
+        residP[t]=clamp01(residP[t] + 0.02*(sy-0.5));
+        residS[t]=clamp01(residS[t] + 0.02*(sz-0.5));
+        q2EmitClass(Q2_CLASS.Resid, [[8,Q2_TYPE.UINT3,t],[6,Q2_TYPE.UINT3,tickCount%81]]);
+      }
+    }
+  }
+
+  // ---------- NNMs ----------
+  function forEachTileActive(f){ for(let ty=0;ty<TY;ty++) for(let tx=0;tx<TX;tx++){ if(tileActive[tIdx(tx,ty)]) f(tx,ty);} }
+  function forEachPx(tx,ty,f){ for(let y=0;y<TILE;y++) for(let x=0;x<TILE;x++){ const i=idx(tx*TILE+x,ty*TILE+y); f(i,tx*TILE+x,ty*TILE+y);} }
+  function nnm1_gate(){
+    forEachTileActive((tx,ty)=>{
+      forEachPx(tx,ty,(i)=>{
+        const gx=railField[i*3+0], gy=railField[i*3+1], gz=railField[i*3+2];
+        const gain=0.1, clampGain=v=>Math.max(0.9,Math.min(1.1,v));
+        const fR=clampGain(1 + gain*(gx - (gy+gz)/2));
+        const fG=clampGain(1 + gain*(gy - (gx+gz)/2));
+        const fB=clampGain(1 + gain*(gz - (gx+gy)/2));
+        const nR=clamp01(get(i,CH.R)*fR), nG=clamp01(get(i,CH.G)*fG), nB=clamp01(get(i,CH.B)*fB);
+        set(i,CH.R, applyDomain(get(i,CH.R), nR, i, 0));
+        set(i,CH.G, applyDomain(get(i,CH.G), nG, i, 0));
+        set(i,CH.B, applyDomain(get(i,CH.B), nB, i, 0));
+      });
+    });
+  }
+  function nnm2_pixelDrift(){
+    forEachTileActive((tx,ty)=>{
+      forEachPx(tx,ty,(i,x,y)=>{
+        const mag=railField[i*3+0]+railField[i*3+1]+railField[i*3+2];
+        const ctBlend=(0.03 + 0.2*get(i,CH.Q)) * (1+0.6*mag);
+        let r=0,g=0,b=0,c=0;
+        for(let dy=-1;dy<=1;dy++) for(let dx=-1;dx<=1;dx++){ const j=idx(x+dx,y+dy); r+=get(j,CH.R); g+=get(j,CH.G); b+=get(j,CH.B); c++; }
+        const nR=lerp(get(i,CH.R), r/c, ctBlend), nG=lerp(get(i,CH.G), g/c, ctBlend), nB=lerp(get(i,CH.B), b/c, ctBlend);
+        set(i,CH.R, applyDomain(get(i,CH.R), nR, i, 0));
+        set(i,CH.G, applyDomain(get(i,CH.G), nG, i, 0));
+        set(i,CH.B, applyDomain(get(i,CH.B), nB, i, 0));
+      });
+    });
+  }
+  function nnm3_tileMix(){
+    forEachTileActive((tx,ty)=>{
+      let r=0,g=0,b=0,c=0,mag=0;
+      forEachPx(tx,ty,(i)=>{ r+=get(i,CH.R); g+=get(i,CH.G); b+=get(i,CH.B); mag+=railField[i*3+0]+railField[i*3+1]+railField[i*3+2]; c++;});
+      r/=c; g/=c; b/=c; mag/=Math.max(1,c);
+      const soft=(0.03+0.10*mag), cx=tx*TILE+TILE/2, cy=ty*TILE+TILE/2;
+      forEachPx(tx,ty,(i,px,py)=>{
+        const dx=Math.abs(px-cx)/(TILE/2), dy=Math.abs(py-cy)/(TILE/2); const w=hann(Math.max(dx,dy)), t=w*soft;
+        set(i,CH.R, applyDomain(get(i,CH.R), lerp(get(i,CH.R), r, t), i, 0));
+        set(i,CH.G, applyDomain(get(i,CH.G), lerp(get(i,CH.G), g, t), i, 0));
+        set(i,CH.B, applyDomain(get(i,CH.B), lerp(get(i,CH.B), b, t), i, 0));
+      });
+    });
+  }
+  function nnm4_domain(){
+    forEachTileActive((tx,ty)=>{
+      let sx=0,sy=0,sz=0,c=0;
+      forEachPx(tx,ty,(i)=>{ sx+=railField[i*3+0]; sy+=railField[i*3+1]; sz+=railField[i*3+2]; c++;});
+      const ax=clamp01(sx/c), ay=clamp01(sy/c), az=clamp01(sz/c);
+      const blend=0.16;
+      forEachPx(tx,ty,(i)=>{
+        set(i,CH.Q, applyDomain(get(i,CH.Q), lerp(get(i,CH.Q), ax + 0.25*residQ[tIdx(tx,ty)], blend), i, 1));
+        set(i,CH.P, applyDomain(get(i,CH.P), lerp(get(i,CH.P), ay + 0.25*residP[tIdx(tx,ty)], blend), i, 1));
+        const sN=lerp(get(i,CH.S), az + 0.25*residS[tIdx(tx,ty)], 0.05);
+        set(i,CH.S, on(el('privS'),true) ? applyDomain(get(i,CH.S), sN, i, 2) : get(i,CH.S));
+      });
+    });
+  }
+  function keepEnergy(){
+    forEachTileActive((tx,ty)=>{
+      const target=0.55, alphaK=0.03;
+      forEachPx(tx,ty,(i)=>{
+        const r=get(i,CH.R), g=get(i,CH.G), b=get(i,CH.B); const L=0.2126*r+0.7152*g+0.0722*b; const scale=1+alphaK*(target-L);
+        const nR=clamp01(r*scale), nG=clamp01(g*scale), nB=clamp01(b*scale);
+        set(i,CH.R, applyDomain(r, nR, i, 0)); set(i,CH.G, applyDomain(g, nG, i, 0)); set(i,CH.B, applyDomain(b, nB, i, 0));
+      });
+    });
+  }
+
+  // ---------- REQ/ACK ----------
+  const reqPrev=new Uint8Array(NT), ackPrev=new Uint8Array(NT);
+  const reqNow=new Uint8Array(NT), ackNow=new Uint8Array(NT);
+  const partner=new Int32Array(NT);
+  let hsTotal=0, reqEdges=0, ackEdges=0;
+  function q2EmitProto(tile, kindCode , peer){
+    if(!on(el('q2Enable'))) return;
+    q2EmitKey(5); q2PushTok(Q2_TYPE.SYM3); q2EmitBase3(kindCode);
+    q2EmitKey(8); q2PushTok(Q2_TYPE.UINT3); q2EmitBase3(tile);
+    q2EmitKey(9); q2PushTok(Q2_TYPE.UINT3); q2EmitBase3(Math.max(0,peer|0));
+    q2EmitKey(6); q2PushTok(Q2_TYPE.UINT3); q2EmitBase3(tickCount % 243);
+    q2BumpClass(kindCode);
+  }
+  function protoStep(){
+    reqPrev.set(reqNow); ackPrev.set(ackNow); reqNow.fill(0); ackNow.fill(0);
+    const startP=numVal(el('protoStart'),0.01), faultP=numVal(el('faultPct'),5)/100;
+    if(on(el('protoEnable'),true)){
+      for(let t=0;t<NT;t++){
+        if(Math.random()<startP*bitBias[t]){
+          const tx=t%TX, ty=(t/TX)|0; const nbr = (Math.random()<0.6)? tIdx((tx+1)%TX,ty) : tIdx(tx,(ty+1)%TY);
+          if(Math.random()>=faultP){ reqNow[t]=1; partner[t]=nbr; }
+        }
+      }
+      for(let t=0;t<NT;t++){
+        let got=-1; const tx=t%TX, ty=(t/TX)|0;
+        const neighbors=[tIdx((tx-1+TX)%TX,ty), tIdx((tx+1)%TX,ty), tIdx(tx,(ty-1+TY)%TY), tIdx(tx,(ty+1)%TY)];
+        for(const n of neighbors){ if(reqNow[n] && partner[n]===t){ got=n; break; } }
+        if(got>=0 && Math.random()>=faultP){ ackNow[t]=1; partner[t]=got; }
+      }
+      for(let t=0;t<NT;t++){
+        if(reqNow[t]){ const dst=partner[t]; if(ackNow[dst] && partner[dst]===t){
+          hsTotal++; q2EmitProto(t,Q2_CLASS.Hs,dst); q2EmitProto(dst,Q2_CLASS.Hs,t);
+          const ttl= numVal(el('trailSec')||{value:6},6); trailEdges.push({u:t,v:dst,life:ttl,ttl}); while(trailEdges.length>MAX_TRAILS) trailEdges.shift();
+          reqNow[t]=0; ackNow[dst]=0; } }
+      }
+    }
+    let rEdge=0, aEdge=0;
+    for(let t=0;t<NT;t++){
+      if(reqNow[t] && !reqPrev[t]){ rEdge++; q2EmitProto(t,Q2_CLASS.Req,partner[t]); }
+      if(ackNow[t] && !ackPrev[t]){ aEdge++; q2EmitProto(t,Q2_CLASS.Ack,partner[t]); }
+    }
+    reqEdges+=rEdge; ackEdges+=aEdge;
+    el('hsCount').textContent=hsTotal; el('reqEdges').textContent=reqEdges; el('ackEdges').textContent=ackEdges;
+  }
+
+  // ---------- SpaceFrame ----------
+  function frameMap(q,p,s){
+    const f=el('spaceFrame').value;
+    if(f==='WORLD'){ return [q,p,s]; }
+    if(f==='MAP'){ const q2=clamp01(0.2+0.8*q), p2=clamp01(0.2+0.8*p), s2=clamp01(0.2+0.8*s); return [ (q2+p2)/2, (p2+s2)/2, (s2+q2)/2 ]; }
+    return [ q*q, p*p, s*s ];
+  }
+
+  // ---------- Predictive Modeling ----------
+  const PRED={enabled:false, lambda:0.30, horizon:1, alpha:0.50, mseRails:0, mseSem:0, initialized:false};
+
+  const prevQ=new Float32Array(W*H), prevP=new Float32Array(W*H), prevS=new Float32Array(W*H);
+  const vQ=new Float32Array(W*H), vP=new Float32Array(W*H), vS=new Float32Array(W*H);
+  const pQ=new Float32Array(W*H), pP=new Float32Array(W*H), pS=new Float32Array(W*H);
+  const lastPQ=new Float32Array(W*H), lastPP=new Float32Array(W*H), lastPS=new Float32Array(W*H);
+
+  const prevRF=new Float32Array(W*H*3), vRF=new Float32Array(W*H*3), pRF=new Float32Array(W*H*3), lastPRF=new Float32Array(W*H*3);
+  const predEdge=new Float32Array(W*H);
+
+  function predInitFromCurrent(){
+    forEachPixel((x,y,i)=>{
+      prevQ[i]=get(i,CH.Q); prevP[i]=get(i,CH.P); prevS[i]=get(i,CH.S);
+      pQ[i]=prevQ[i]; pP[i]=prevP[i]; pS[i]=prevS[i];
+      lastPQ[i]=prevQ[i]; lastPP[i]=prevP[i]; lastPS[i]=prevS[i];
+      vQ[i]=vP[i]=vS[i]=0;
+    });
+    for(let k=0;k<railField.length;k++){ prevRF[k]=railField[k]; pRF[k]=railField[k]; lastPRF[k]=railField[k]; vRF[k]=0; }
+    computeEdgeFromQPS(pQ,pP,pS,predEdge);
+    PRED.initialized=true;
+  }
+
+  function computeEdgeFromQPS(Q,P,S,out){
+    let maxMag=1e-6;
+    for(let y=0;y<H;y++){
+      for(let x=0;x<W;x++){
+        const i=idx(x,y), xr=(x+1)%W, xl=(x-1+W)%W, yu=(y-1+H)%H, yd=(y+1)%H;
+        const dQdx=(Q[idx(xr,y)]-Q[idx(xl,y)])*0.5, dQdy=(Q[idx(x,yu)]-Q[idx(x,yd)])*0.5;
+        const dPdx=(P[idx(xr,y)]-P[idx(xl,y)])*0.5, dPdy=(P[idx(x,yu)]-P[idx(x,yd)])*0.5;
+        const dSdx=(S[idx(xr,y)]-S[idx(xl,y)])*0.5, dSdy=(S[idx(x,yu)]-S[idx(x,yd)])*0.5;
+        const dxm=Math.abs(dQdx)+Math.abs(dPdx)+Math.abs(dSdx);
+        const dym=Math.abs(dQdy)+Math.abs(dPdy)+Math.abs(dSdy);
+        const mag=Math.hypot(dxm,dym); out[i]=mag; if(mag>maxMag) maxMag=mag;
+      }
+    }
+    const inv=1/maxMag; for(let i=0;i<out.length;i++) out[i]=Math.min(1,out[i]*inv);
+  }
+
+  function predictiveUpdate(){
+    if(!PRED.enabled){ PRED.mseRails=0; PRED.mseSem=0; PRED.initialized=false; return; }
+    if(!PRED.initialized) predInitFromCurrent();
+
+    // 1) Compute prediction error vs last predicted fields (arrived now)
+    let eR=0, eS=0, n=W*H;
+    for(let i=0;i<n;i++){
+      const q=get(i,CH.Q), p=get(i,CH.P), s=get(i,CH.S);
+      const [qf,pf,sf]=frameMap(q,p,s);
+      const [qfp,pfp,sfp]=frameMap(lastPQ[i], lastPP[i], lastPS[i]);
+      const semNow=(qf*pf + pf*sf + qf*sf)/3, semPred=(qfp*pfp + pfp*sfp + qfp*sfp)/3;
+      const dS=semNow - semPred; eS += dS*dS;
+    }
+    for(let k=0;k<railField.length;k++){
+      const d=railField[k] - lastPRF[k]; eR += d*d;
+    }
+    PRED.mseRails = (eR / (railField.length)) || 0;
+    PRED.mseSem   = (eS / n) || 0;
+
+    // 2) Update velocities (EMA) and compute new predictions
+    const alpha=PRED.alpha, h=PRED.horizon;
+    for(let i=0;i<n;i++){
+      const q=get(i,CH.Q), p=get(i,CH.P), s=get(i,CH.S);
+      const dq=q - prevQ[i]; const dp=p - prevP[i]; const ds=s - prevS[i];
+      vQ[i] = (1-alpha)*vQ[i] + alpha*dq; vP[i] = (1-alpha)*vP[i] + alpha*dp; vS[i] = (1-alpha)*vS[i] + alpha*ds;
+      pQ[i]=clamp01(q + h*vQ[i]); pP[i]=clamp01(p + h*vP[i]); pS[i]=clamp01(s + h*vS[i]);
+      prevQ[i]=q; prevP[i]=p; prevS[i]=s;
+    }
+    for(let k=0;k<railField.length;k++){
+      const d=railField[k] - prevRF[k];
+      vRF[k] = (1-alpha)*vRF[k] + alpha*d;
+      pRF[k] = clamp01(railField[k] + h*vRF[k]);
+      prevRF[k]=railField[k];
+    }
+    computeEdgeFromQPS(pQ,pP,pS,predEdge);
+
+    // 3) Store predictions for next-tick error calc
+    lastPQ.set(pQ); lastPP.set(pP); lastPS.set(pS); lastPRF.set(pRF);
+  }
+
+  // ---------- TSP helpers ----------
+  const citiesR=el('cities'), cityVal=el('cityVal'), costModel=el('costModel'), precision=el('precision'),
+        atomicRange=el('atomicRange'), domainDynamic=el('domainDynamic'),
+        autoNNM=el('autoNNM'), macroNNM=el('macroNNM'), microNNM=el('microNNM'), stepsPerFrame=el('stepsPerFrame'),
+        tspLen=el('tspLen'), tspBest=el('tspBest'), tspAcc=el('tspAcc'), tspAtt=el('tspAtt'), precNow=el('precNow');
+
+  function setCityCount(n){ TSP.N=Math.max(6,Math.min(160,n|0)); cityVal.textContent=TSP.N; }
+  function euclid(a,b){ const dx=a.x+bias0(a)-b.x-bias1(b), dy=a.y+bias0(a)-b.y-bias1(b); return Math.hypot(dx,dy); }
+  function bias0(){return 0} function bias1(){return 0}
+
+  const pP_ = pP;
+
+  function segmentCost(a,b,prec,model){
+    const base=Math.hypot(a.x-b.x, a.y-b.y);
+    if(model==='EUCLID') return base;
+
+    let samples=(prec==='MACRO')?2:(prec==='MESO')?6:12;
+    let jitter=(prec==='MICRO')?TSP.microRange:0;
+
+    let accRailN=0, accEdgeN=0, accSemN=0;
+    for(let si=0;si<samples;si++){
+      let t=(si+0.5)/samples; let x=a.x+(b.x-a.x)*t, y=a.y+(b.y-a.y)*t;
+      if(jitter>0){ const jx=(Math.random()*2-1)*jitter, jy=(Math.random()*2-1)*jitter; x=clamp01((x+jx)/W)*W; y=clamp01((y+jy)/H)*H; }
+      const ii=idx(Math.round(x),Math.round(y)); const tix=tIdx((x/TILE)|0,(y/TILE)|0);
+
+      const rMagN=railField[ii*3+0]+railField[ii*3+1]+railField[ii*3+2];
+      const eN=edgeMap[ii];
+      let q=get(ii,CH.Q), p=get(ii,CH.P), s=get(ii,CH.S);
+      q=clamp01(q+0.2*residQ[tix]); p=clamp01(p+0.2*residP[tix]); s=clamp01(s+0.2*residS[tix]);
+      const [qf,pf,sf]=frameMap(q,p,s);
+      const semN=(qf*pf + pf*sf + qf*sf)/3;
+
+      accRailN+=rMagN; accEdgeN+=eN; accSemN+=semN;
+    }
+    accRailN/=samples; accEdgeN/=samples; accSemN/=samples;
+
+    let cNow;
+    if(model==='RAIL'){ const beta=(prec==='MICRO')?0.35:(prec==='MESO')?0.25:0.15; cNow= base*(1-beta*accRailN); }
+    else if(model==='SEM'){ const gamma=(prec==='MICRO')?0.35:(prec==='MESO')?0.25:0.15; const delta=0.10*accSemN; cNow= base*(1+gamma*accEdgeN - delta); }
+    else { const beta=(prec==='MICRO')?0.28:(prec==='MESO')?0.22:0.14; const gamma=(prec==='MICRO')?0.22:(prec==='MESO')?0.18:0.12; const delta=0.06*accSemN; cNow= base*(1 - beta*accRailN + gamma*accEdgeN - delta); }
+
+    if(!PRED.enabled) return cNow;
+
+    let accRailP=0, accEdgeP=0, accSemP=0;
+    for(let si=0;si<samples;si++){
+      let t=(si+0.5)/samples; let x=a.x+(b.x-a.x)*t, y=a.y+(b.y-a.y)*t;
+      if(jitter>0){ const jx=(Math.random()*2-1)*jitter, jy=(Math.random()*2-1)*jitter; x=clamp01((x+jx)/W)*W; y=clamp01((y+jy)/H)*H; }
+      const ii=idx(Math.round(x),Math.round(y)); const tix=tIdx((x/TILE)|0,(y/TILE)|0);
+
+      const rMagP=pRF[ii*3+0]+pRF[ii*3+1]+pRF[ii*3+2];
+      const eP=predEdge[ii];
+
+      let q=pQ[ii], p=pP_[ii], s=pS[ii];
+      q=clamp01(q+0.2*residQ[tix]); p=clamp01(p+0.2*residP[tix]); s=clamp01(s+0.2*residS[tix]);
+      const [qf,pf,sf]=frameMap(q,p,s);
+      const semP=(qf*pf + pf*sf + qf*sf)/3;
+
+      accRailP+=rMagP; accEdgeP+=eP; accSemP+=semP;
+    }
+    accRailP/=samples; accEdgeP/=samples; accSemP/=samples;
+
+    let cPred;
+    if(model==='RAIL'){ const beta=(prec==='MICRO')?0.35:(prec==='MESO')?0.25:0.15; cPred= base*(1-beta*accRailP); }
+    else if(model==='SEM'){ const gamma=(prec==='MICRO')?0.35:(prec==='MESO')?0.25:0.15; const delta=0.10*accSemP; cPred= base*(1+gamma*accEdgeP - delta); }
+    else { const beta=(prec==='MICRO')?0.28:(prec==='MESO')?0.22:0.14; const gamma=(prec==='MICRO')?0.22:(prec==='MESO')?0.18:0.12; const delta=0.06*accSemP; cPred= base*(1 - beta*accRailP + gamma*accEdgeP - delta); }
+
+    return (1-PRED.lambda)*cNow + PRED.lambda*cPred;
+  }
+
+  function edgeCost(i,j,prec,model){ const A=TSP.cities[i], B=TSP.cities[j]; return segmentCost(A,B,prec,model); }
+  function tourLength(order){
+    const model=TSP.model, prec=currentPrecision(); let L=0, N=order.length;
+    for(let k=0;k<N;k++){ const i=order[k], j=order[(k+1)%N]; L+=edgeCost(i,j,prec,model); }
+    return L;
+  }
+  function currentPrecision(){
+    if(TSP.precision!=='AUTO') return TSP.precision;
+    if(eventsLast>250 || flipsLast>200) return 'MICRO'; if(eventsLast>80 || flipsLast>60) return 'MESO'; return 'MACRO';
+  }
+  function initCities(){
+    TSP.cities.length=0; const rnd=seedFromString((el('payload')?.value||'BNP')+' tsp');
+    for(let k=0;k<TSP.N;k++){
+      let x=(rnd()*W)|0, y=(rnd()*H)|0;
+      if(on(el('meaning'),true)){ const pick=rnd(); if(pick<0.34){ x=Math.round(lerp(10,22,rnd())); y=Math.round(lerp(12,26,rnd())); } else if(pick<0.67){ x=Math.round(lerp(42,54,rnd())); y=Math.round(lerp(16,28,rnd())); } else { x=Math.round(lerp(22,36,rnd())); y=Math.round(lerp(40,56,rnd())); } }
+      let tries=0; while(!gateAtPixel(idx(x,y)) && tries++<50){ x=(x+1)%W; y=(y+1)%H; }
+      TSP.cities.push({x,y});
+    }
+  }
+  function initTour(){
+    const N=TSP.N; TSP.tour=Array.from({length:N},(_,i)=>i);
+    const used=new Uint8Array(N); const path=[0]; used[0]=1;
+    for(let k=1;k<N;k++){ const last=path[path.length-1]; let best=-1, bestD=1e9;
+      for(let j=0;j<N;j++){ if(used[j]) continue; const d=Math.hypot(TSP.cities[last].x-TSP.cities[j].x, TSP.cities[last].y-TSP.cities[j].y); if(d<bestD){bestD=d; best=j;} }
+      used[best]=1; path.push(best);
+    }
+    TSP.tour=path; TSP.len=tourLength(TSP.tour); TSP.best=TSP.len; TSP.accepted=0; TSP.attempts=0; TSP.history.length=0; pushHist(TSP.len);
+  }
+  function pushHist(v){ TSP.history.push(v); if(TSP.history.length>240) TSP.history.shift(); }
+
+  // 2-opt + Top-K
+  function twoOptAttempt(){ const N=TSP.N; if(N<6) return false;
+    const i=(Math.random()*N)|0; let j=(i+2+((Math.random()*(N-3))|0))%N; if(j===0) j=1;
+    const i1=(i+1)%N,j1=(j+1)%N; const order=TSP.tour;
+    const a=order[i], b=order[i1], c=order[j], d=order[j1]; const model=TSP.model, prec=currentPrecision();
+    const old=edgeCost(a,b,prec,model)+edgeCost(c,d,prec,model); const neu=edgeCost(a,c,prec,model)+edgeCost(b,d,prec,model); TSP.attempts++;
+    if(neu+1e-9<old){
+      if(i1<j){ for(let p=i1,q=j;p<q;p++,q--){ const tmp=order[p]; order[p]=order[q]; order[q]=tmp; } }
+      else { const seg=[]; let p=i1; while(true){ seg.push(order[p]); if(p===j) break; p=(p+1)%N; } seg.reverse(); p=i1; let si=0; while(true){ order[p]=seg[si++]; if(p===j) break; p=(p+1)%N; } }
+      const newLen=TSP.len-old+neu; TSP.len=newLen; if(newLen<TSP.best){ TSP.best=newLen; q2EmitClass(Q2_CLASS.TSPImprove,[[10,Q2_TYPE.UINT3,Math.floor(newLen*100)]]); }
+      TSP.accepted++; pushHist(TSP.len); addTspTrailEdges(a,c); addTspTrailEdges(b,d); return true; } return false; }
+  function topKImprove(){
+    if(!on(el('topkEnable'),true)) return;
+    const K=numVal(el('topk'),6); TSP.topkN=K;
+    const N=TSP.N, order=TSP.tour, model=TSP.model, prec=currentPrecision();
+    let cands=[];
+    for(let k=0;k<K;k++){
+      const i=(Math.random()*N)|0; let j=(i+2+((Math.random()*(N-3))|0))%N; if(j===0) j=1;
+      const i1=(i+1)%N,j1=(j+1)%N; const a=order[i], b=order[i1], c=order[j], d=order[j1];
+      const old=edgeCost(a,b,prec,model)+edgeCost(c,d,prec,model); const neu=edgeCost(a,c,prec,model)+edgeCost(b,d,prec,model);
+      cands.push({i,j,i1,j1,delta:neu-old, a,b,c,d});
+    }
+    cands.sort((A,B)=>A.delta-B.delta);
+    if(cands.length && cands[0].delta<-1e-9){
+      const C=cands[0];
+      if(C.i1<C.j){ for(let p=C.i1,q=C.j;p<q;p++,q--){ const tmp=order[p]; order[p]=order[q]; order[q]=tmp; } }
+      else { const seg=[]; let p=C.i1; while(true){ seg.push(order[p]); if(p===C.j) break; p=(p+1)%N; } seg.reverse(); p=C.i1; let si=0; while(true){ order[p]=seg[si++]; if(p===C.j) break; p=(p+1)%N; } }
+      TSP.len = tourLength(order);
+      if(TSP.len<TSP.best){ TSP.best=TSP.len; }
+      addTspTrailEdges(C.a,C.c); addTspTrailEdges(C.b,C.d);
+      q2EmitClass(Q2_CLASS.TopK, [[10,Q2_TYPE.UINT3, Math.floor(TSP.len*100)]]);
+      TSP.topkLast = C.delta;
+    } else { TSP.topkLast = 0; }
+  }
+
+  // AGPRC (light NSGA-II)
+  function agInit(){
+    AG.inds.length=0;
+    for(let i=0;i<AG.pop;i++){
+      const ord=Array.from(TSP.tour);
+      for(let s=0;s<ord.length;s++){ const a=(Math.random()*ord.length)|0, b=(Math.random()*(ord.length)|0); const t=ord[a]; ord[a]=ord[b]; ord[b]=t; }
+      AG.inds.push({order:ord, f:[0,0,0]});
+    }
+    agEvalAll();
+  }
+  function agEvalAll(){
+    for(const ind of AG.inds){
+      const L=tourLength(ind.order);
+      let railA=0, semH=0; const N=ind.order.length;
+      for(let k=0;k<N;k++){
+        const a=TSP.cities[ind.order[k]];
+        const ii=idx(Math.round(a.x),Math.round(a.y));
+        railA+= (railField[ii*3+0]+railField[ii*3+1]+railField[ii*3+2]);
+        const [q,p,s]=[get(ii,CH.Q),get(ii,CH.P),get(ii,CH.S)]; semH+=(q*p+p*s+q*s)/3;
+      }
+      railA/=N; semH/=N;
+      ind.f=[L, (1-railA), (1-clamp01(semH))];
+    }
+  }
+  function paretoRank(){
+    const n=AG.inds.length; const dominates=(a,b)=>{
+      let better=0; for(let d=0;d<3;d++){ if(a.f[d]>b.f[d]+1e-12) return false; if(a.f[d]+1e-12<b.f[d]) better=1; } return better;
+    };
+    const rank=new Array(n).fill(0), domCount=new Array(n).fill(0), fronts=[[]], doms=Array.from({length:n},()=>[]);
+    for(let p=0;p<n;p++){
+      for(let q=0;q<n;q++){ if(p===q) continue; if(dominates(AG.inds[p],AG.inds[q])) doms[p].push(q); else if(dominates(AG.inds[q],AG.inds[p])) domCount[p]++; }
+      if(domCount[p]===0){ rank[p]=0; fronts[0].push(p); }
+    }
+    let i=0; while(fronts[i] && fronts[i].length){ const next=[]; for(const p of fronts[i]) for(const q of doms[p]) if(--domCount[q]===0){ rank[q]=i+1; next.push(q);} i++; fronts[i]=next; }
+    AG.front0 = fronts[0]?.length||0;
+    return {rank, fronts: fronts.filter(f=>f.length)};
+  }
+  function agStep(){
+    if(!AG.enabled) return;
+    const evalBudget = Math.max(1, Math.floor(numVal(el('evals'), 40) * PERF.workScale));
+    for (let e = evalBudget; e > 0; e--) {
+      const {fronts}=paretoRank();
+      const pool = (fronts[0] && fronts[0].length>=2) ? fronts[0] : Array.from({length:AG.inds.length},(_,i)=>i);
+      const pa=AG.inds[ pool[(Math.random()*pool.length)|0] ];
+      const pb=AG.inds[ pool[(Math.random()*pool.length)|0] ];
+      const N=pa.order.length, a=(Math.random()*N)|0, b=(a+((Math.random()*(N-1))|0))%N;
+      const child=new Array(N).fill(-1); const taken=new Set(); const [lo,hi]=a<b?[a,b]:[b,a];
+      for(let i=lo;i<=hi;i++){ child[i]=pa.order[i]; taken.add(pa.order[i]); }
+      let idxw=(hi+1)%N; for(let i=0;i<N;i++){ const gene=pb.order[(hi+1+i)%N]; if(!taken.has(gene)){ child[idxw]=gene; idxw=(idxw+1)%N; } }
+      if(Math.random()<0.5){ const i1=(Math.random()*N)|0, j1=(i1+2+((Math.random()*(N-3))|0))%N; if(i1<j1){ for(let p=i1,q=j1;p<q;p++,q--){ const t=child[p]; child[p]=child[q]; child[q]=t; } } }
+      const worstI = AG.inds.reduce((bi,_,i)=> (bi<0||AG.inds[i].f[0]>AG.inds[bi].f[0])?i:bi, -1);
+      const L=tourLength(child);
+      let railA=0, semH=0; const N2=child.length;
+      for(let k=0;k<N2;k++){ const aC=TSP.cities[child[k]]; const ii=idx(Math.round(aC.x),Math.round(aC.y));
+        railA+= (railField[ii*3+0]+railField[ii*3+1]+railField[ii*3+2]);
+        const [q,p,s]=[get(ii,CH.Q),get(ii,CH.P),get(ii,CH.S)]; semH+=(q*p+p*s+q*s)/3;}
+      railA/=N2; semH/=N2;
+      AG.inds[worstI]={order:child,f:[L,(1-railA),(1-clamp01(semH))]};
+    }
+    const prevBest=TSP.best;
+    const {fronts}=paretoRank();
+    if(fronts[0] && fronts[0].length){
+      let bestIdx=fronts[0][0], bestL=AG.inds[bestIdx].f[0];
+      for(const i of fronts[0]) if(AG.inds[i].f[0]<bestL){ bestL=AG.inds[i].f[0]; bestIdx=i; }
+      TSP.tour = Array.from(AG.inds[bestIdx].order);
+      TSP.len = bestL; if(TSP.len<TSP.best){ TSP.best=TSP.len; q2EmitClass(Q2_CLASS.AGPick, [[10,Q2_TYPE.UINT3,Math.floor(TSP.len*100)]]); }
+    }
+    AG.lastDelta = (prevBest - TSP.best);
+    el('front0').textContent=AG.front0.toString();
+    el('paretoDelta').textContent=AG.lastDelta.toFixed(2);
+  }
+
+  // Trails from TSP swaps
+  function addTspTrailEdges(i,j){
+    const ci=TSP.cities[i], cj=TSP.cities[j];
+    const ti=tIdx((ci.x/TILE)|0, (ci.y/TILE)|0), tj=tIdx((cj.x/TILE)|0, (cj.y/TILE)|0);
+    if(((tileMask(ti)&1) && (tileMask(tj)&1))){ const ttl=6.0; rayEdges.push({u:ti,v:tj,life:ttl,ttl}); while(rayEdges.length>MAX_RAY_EDGES) rayEdges.shift(); }
+  }
+
+  // ---------- DomainApply + CRC ----------
+  const codeRect={x:2,y:2,w:16,h:8}; let crcOk=0, crcBad=0;
+  function crc32(bytes){ let c=~0; for(const b of bytes){ c^=b; for(let k=0;k<8;k++) c = (c&1)?(0xEDB88320 ^ (c>>>1)):(c>>>1); } return ~c>>>0; }
+  function proposeCodeUpdate(){
+    const bytes=[]; for(let yy=0;yy<codeRect.h;yy++) for(let xx=0;xx<codeRect.w;xx++){ const i=idx(codeRect.x+xx,codeRect.y+yy); bytes.push( (get(i,CH.S)*255)|0 ); }
+    const c=crc32(bytes);
+    if((c&0xFF) < 160){
+      crcOk++;
+      for(let yy=0;yy<codeRect.h;yy++) for(let xx=0;xx<codeRect.w;xx++){ const i=idx(codeRect.x+xx,codeRect.y+yy); const v=clamp01(get(i,CH.Q)*0.9 + 0.1*(bytes[yy*codeRect.w+xx]/255)); set(i,CH.Q, applyDomain(get(i,CH.Q), v, i, 1)); }
+      q2EmitClass(Q2_CLASS.CRCok, [[6,Q2_TYPE.UINT3,tickCount%243]]);
+    } else { crcBad++; q2EmitClass(Q2_CLASS.CRCbad, [[6,Q2_TYPE.UINT3,tickCount%243]]); }
+  }
+
+  // ---------- Drawing ----------
+  function domainMaskColor(mask){
+    let r=0,g=0,b=0;
+    if(mask&1){ g+=1.0; }
+    if(mask&2){ b+=1.0; }
+    if(mask&4){ r+=0.9; b+=0.9; }
+    if(mask&8){ r+=1.0; g+=1.0; }
+    r=Math.min(1,r); g=Math.min(1,g); b=Math.min(1,b);
+    const rr=(r*255)|0, gg=(g*255)|0, bb=(b*255)|0;
+    return `rgba(${rr},${gg},${bb},0.18)`;
+  }
+  function draw2D(){
+    const img=g2d.createImageData(W,H);
+    forEachPixel((x,y,i)=>{
+      let r=sheet[i*6+CH.R], g=sheet[i*6+CH.G], b=sheet[i*6+CH.B];
+      if(on(el('ctauOverlay'),true)){
+        const t=tIdx((x/TILE)|0,(y/TILE)|0); const ct=clamp01(cTau[t]/2);
+        r=clamp01(r + 0.05*ct); g=clamp01(g + 0.02*ct);
+      }
+      const k=(y*W+x)*4; img.data[k]=(r*255)|0; img.data[k+1]=(g*255)|0; img.data[k+2]=(b*255)|0; img.data[k+3]=255;
+    });
+    const off=document.createElement('canvas'); off.width=W; off.height=H; off.getContext('2d').putImageData(img,0,0);
+    g2d.imageSmoothingEnabled=false; g2d.clearRect(0,0,c2d.width,c2d.height); g2d.drawImage(off,0,0,c2d.width,c2d.height);
+    const scaleX=c2d.width/W, scaleY=c2d.height/H;
+
+    if(on(el('schedOverlay'),true)){ for(let ty=0;ty<TY;ty++) for(let tx=0;tx<TX;tx++){ const t=tIdx(tx,ty), v=bitBias[t]; g2d.fillStyle=`rgba(0,255,120,${0.08+0.22*v})`; g2d.fillRect(tx*TILE*scaleX,ty*TILE*scaleY,TILE*scaleX,TILE*scaleY);} }
+
+    if(on(el('domainOverlay'),true)){
+      for(let ty=0;ty<TY;ty++) for(let tx=0;tx<TX;tx++){
+        const t=tIdx(tx,ty); g2d.fillStyle = domainMaskColor(tileMask(t));
+        g2d.fillRect(tx*TILE*scaleX, ty*TILE*scaleY, TILE*scaleX, TILE*scaleY);
+      }
+    }
+
+    if(on(el('bitonicProof'),true)){
+      g2d.strokeStyle='rgba(110,231,255,0.25)'; g2d.lineWidth=1;
+      for(let x=0;x<=W;x+=TILE*2){ const X=x*scaleX; g2d.beginPath(); g2d.moveTo(X,0); g2d.lineTo(X,c2d.height); g2d.stroke(); }
+      for(let y=0;y<=H;y+=TILE*2){ const Y=y*scaleY; g2d.beginPath(); g2d.moveTo(0,Y); g2d.lineTo(c2d.width,Y); g2d.stroke(); }
+    }
+
+    g2d.strokeStyle='#1c2530'; g2d.lineWidth=1;
+    for(let x=0;x<=W;x+=TILE){ const X=x*scaleX; g2d.beginPath(); g2d.moveTo(X,0); g2d.lineTo(X,c2d.height); g2d.stroke(); }
+    for(let y=0;y<=H;y+=TILE){ const Y=y*scaleY; g2d.beginPath(); g2d.moveTo(0,Y); g2d.lineTo(c2d.width,Y); g2d.stroke(); }
+
+    if(on(el('gateEnable')||{checked:true},true)){
+      g2d.strokeStyle='rgba(255,209,102,0.35)'; g2d.lineWidth=1;
+      for(let ty=0;ty<TY;ty++) for(let tx=0;tx<TX;tx++){
+        if(!gateTile[tIdx(tx,ty)]){
+          const x0=tx*TILE*scaleX, y0=ty*TILE*scaleY, w=TILE*scaleX, h=TILE*scaleY;
+          for(let k=0;k<w+h; k+=8){ g2d.beginPath(); g2d.moveTo(x0+Math.max(0,k-h), y0+Math.min(h,k)); g2d.lineTo(x0+Math.min(w,k), y0+Math.max(0,k-w)); g2d.stroke(); }
+        }
+      }
+    }
+
+    g2d.fillStyle='rgba(255,255,255,0.8)';
+    forEachPixel((x,y,i)=>{ if(rails[i]!==0){ g2d.fillRect(x*scaleX+scaleX*0.35, y*scaleY+scaleY*0.35, Math.max(1,scaleX*0.3), Math.max(1,scaleY*0.3)); } });
+
+    if(on(el('predOverlay'),true) && PRED.enabled){
+      forEachPixel((x,y,i)=>{
+        const pr = pRF[i*3+0]+pRF[i*3+1]+pRF[i*3+2];
+        if(pr>0.01){
+          g2d.fillStyle=`rgba(110,231,255,${0.07+0.18*Math.min(1,pr)})`;
+          g2d.fillRect(x*scaleX, y*scaleY, scaleX, scaleY);
+        }
+      });
+    }
+
+    if(on(el('frontOverlay'),true) && AG.enabled){
+      const pr=paretoRank();
+      const F0 = pr.fronts[0]||[];
+      const count = Math.min(numVal(el('frontN'),6), F0.length);
+      for(let n=0;n<count;n++){
+        const idxInd = F0[n];
+        const ind = AG.inds[idxInd];
+        if(!ind) continue;
+        const hue = (n*360/count)|0;
+        g2d.strokeStyle=`hsla(${hue},85%,65%,0.28)`;
+        g2d.lineWidth=2.0; g2d.beginPath();
+        const N=ind.order.length;
+        for(let k=0;k<N;k++){
+          const a=TSP.cities[ind.order[k]], b=TSP.cities[ind.order[(k+1)%N]];
+          g2d.moveTo(a.x*scaleX, a.y*scaleY);
+          g2d.lineTo(b.x*scaleX, b.y*scaleY);
+        }
+        g2d.stroke();
+      }
+    }
+
+    if(on(el('tspEnable'),true)){
+      g2d.lineWidth=2.2; g2d.strokeStyle='rgba(110,231,255,0.95)'; g2d.beginPath(); const N=TSP.N;
+      for(let k=0;k<N;k++){ const a=TSP.cities[TSP.tour[k]], b=TSP.cities[TSP.tour[(k+1)%N]]; g2d.moveTo(a.x*scaleX,a.y*scaleY); g2d.lineTo(b.x*scaleX, a.y*scaleY + (b.y-a.y)*scaleY); } g2d.stroke();
+      g2d.fillStyle='rgba(255,255,255,0.95)'; for(const c of TSP.cities){ g2d.beginPath(); g2d.arc(c.x*scaleX,c.y*scaleY,3,0,Math.PI*2); g2d.fill(); }
+      const bandH=Math.max(2,Math.floor(0.07*H)); const min=Math.min(...TSP.history), max=Math.max(...TSP.history), den=(max-min)||1;
+      g2d.strokeStyle='rgba(255,214,102,0.9)'; g2d.lineWidth=1.5; g2d.beginPath();
+      for(let i=0;i<TSP.history.length;i++){ const v=(TSP.history[i]-min)/den; const x=i/TSP.history.length*c2d.width; const y=c2d.height - v*bandH - 2; if(i===0) g2d.moveTo(x,y); else g2d.lineTo(x,y); } g2d.stroke();
+    }
+
+    g2d.strokeStyle='rgba(255,107,214,0.5)'; g2d.strokeRect(codeRect.x*scaleX,codeRect.y*scaleY,codeRect.w*scaleX,codeRect.h*scaleY);
+  }
+
+  // 3D
+  let rotX=-0.6, rotY=0.8, dragging=false, lastMouse=null;
+  function proj3D(x,y,z,w,h,rx,ry){ const fov=420, cx=w/2, cy=h/2; const cosX=Math.cos(rx), sinX=Math.sin(rx), cosY=Math.cos(ry), sinY=Math.sin(ry);
+    let zx=x*cosY+z*sinY, zz=-x*sinY+z*cosY; let yx=y*cosX-zz*sinX, yz=y*sinX+zz*cosX; const d=1.5+yz; return [cx+(zx*fov)/d, cy-(yx*fov)/d, d]; }
+  function neighborOf(t,dir){ const tx=t%TX, ty=(t/TX)|0; if(dir===1) return tIdx((tx+1)%TX,ty); if(dir===2) return tIdx(tx,(ty+1)%TY); return tIdx((tx+1)%TX,(ty+1)%TY); }
+  function draw3D(){
+    const w=c3d.width,h=c3d.height; g3d.clearRect(0,0,w,h); g3d.fillStyle='#0a0e13'; g3d.fillRect(0,0,w,h);
+    g3d.strokeStyle='#1f2a36'; g3d.beginPath(); g3d.moveTo(40,h-40); g3d.lineTo(w-40,h-40); g3d.stroke(); g3d.beginPath(); g3d.moveTo(40,h-40); g3d.lineTo(40,40); g3d.stroke();
+    const pct=0.4, count=(W*H*pct)|0;
+    for(let n=0;n<count;n++){
+      const i=(n*9973)%(W*H); const q=get(i,CH.Q), p=get(i,CH.P), s=get(i,CH.S); const [Q,P,S]=frameMap(q,p,s);
+      const [px,py]=proj3D(Q*2-1,P*2-1,S*2-1,w,h,rotX,rotY);
+      const r=(sheet[i*6+CH.R]*255)|0, g=(sheet[i*6+CH.G]*255)|0, b=(sheet[i*6+CH.B]*255)|0; g3d.fillStyle=`rgba(${r},${g},${b},0.65)`; g3d.fillRect(px,py,2,2);
+    }
+    const ttl=numVal(el('trailSec')||{value:6},6);
+    for(const e of trailEdges){ const u=e.u,v=e.v; const ux=tilePos[u*3+0]*2-1, uy=tilePos[u*3+1]*2-1, uz=tilePos[u*3+2]*2-1;
+      const vx=tilePos[v*3+0]*2-1, vy=tilePos[v*3+1]*2-1, vz=tilePos[v*3+2]*2-1; const [x0,y0]=proj3D(ux,uy,uz,w,h,rotX,rotY), [x1,y1]=proj3D(vx,vy,vz,w,h,rotX,rotY);
+      const a=Math.max(0,Math.min(1,e.life/ttl)); g3d.strokeStyle=`rgba(255,214,102,${0.25+0.6*a})`; g3d.lineWidth=1.5; g3d.beginPath(); g3d.moveTo(x0,y0); g3d.lineTo(x1,y1); g3d.stroke(); }
+    for(const e of rayEdges){ const u=e.u,v=e.v; const ux=tilePos[u*3+0]*2-1, uy=tilePos[u*3+1]*2-1, uz=tilePos[u*3+2]*2-1;
+      const vx=tilePos[v*3+0]*2-1, vy=tilePos[v*3+1]*2-1, vz=tilePos[v*3+2]*2-1; const [x0,y0]=proj3D(ux,uy,uz,w,h,rotX,rotY), [x1,y1]=proj3D(vx,vy,vz,w,h,rotX,rotY);
+      const a=Math.max(0,Math.min(1,e.life/e.ttl)); g3d.strokeStyle=`rgba(110,231,255,${0.20+0.65*a})`; g3d.lineWidth=1.7; g3d.beginPath(); g3d.moveTo(x0,y0); g3d.lineTo(x1,y1); g3d.stroke(); }
+    g3d.lineWidth=1; g3d.strokeStyle='rgba(110,231,255,0.25)';
+    for(let t=0;t<NT;t++){ const u=t,v=neighborOf(t,tileFlow[t]); const ux=tilePos[u*3+0]*2-1, uy=tilePos[u*3+1]*2-1, uz=tilePos[u*3+2]*2-1; const vx=tilePos[v*3+0]*2-1, vy=tilePos[v*3+1]*2-1, vz=tilePos[v*3+2]*2-1;
+      const [x0,y0]=proj3D(ux,uy,uz,w,h,rotX,rotY), [x1,y1]=proj3D(vx,vy,vz,w,h,rotX,rotY); g3d.beginPath(); g3d.moveTo(x0,y0); g3d.lineTo(lerp(x0,x1,0.35), lerp(y0,y1,0.35)); g3d.stroke(); }
+    const scale=numVal(el('nodeScale')||{value:1.6},1.6);
+    for(let t=0;t<NT;t++){ const x=tilePos[t*3+0]*2-1,y=tilePos[t*3+1]*2-1,z=tilePos[t*3+2]*2-1; const [px,py]=proj3D(x,y,z,w,h,rotX,rotY);
+      const bb=bitBias[t]||0; const r=2 + 4*bb*scale + 2*(regEnergyTile[t]/4); g3d.fillStyle=`rgba(126,252,138,${0.25+0.55*bb})`; g3d.beginPath(); g3d.arc(px,py,r,0,Math.PI*2); g3d.fill(); }
+    g3d.strokeStyle='#1c2530'; g3d.strokeRect(0,0,w,h);
+  }
+
+  // ---------- Self-Optimizer ----------
+  const OPT={
+    enabled:false, objective:'BAL', perfWeight:0.5, intervalMs:1500, amp:0.30, eps:0.15,
+    phase:'BASELINE', lastEvalT:performance.now(),
+    winFPS:[], winLEN:[],
+    norm:{fpsMin:Infinity,fpsMax:0,lenMin:Infinity,lenMax:0},
+    acceptedParams:null, acceptedScore:null, bestParams:null, bestScore:-Infinity,
+    candidate:null
+  };
+  const PARAMS_KEYS=['pFlip','edgeBias','rad','predEnable','predLambda','predHorizon','predAlpha','stepsPerFrame','topk'];
+  const BOUNDS={
+    pFlip:[0,0.05], edgeBias:[0,3], rad:[1,12], predEnable:[0,1], predLambda:[0,1], predHorizon:[1,4],
+    predAlpha:[0.2,0.8], stepsPerFrame:[10,2000], topk:[2,16]
+  };
+  function getParamsFromUI(){
+    return {
+      pFlip:numVal(el('pFlip'),0.002),
+      edgeBias:numVal(el('edgeBias'),1.5),
+      rad:numVal(el('rad'),5)|0,
+      predEnable:on(el('predEnable'),false)?1:0,
+      predLambda:numVal(el('predLambda'),0.30),
+      predHorizon:(numVal(el('predHorizon'),1)|0),
+      predAlpha:numVal(el('predAlpha'),0.50),
+      stepsPerFrame:(numVal(el('stepsPerFrame'),400)|0),
+      topk:(numVal(el('topk'),6)|0)
+    };
+  }
+  function applyParamsToUI(ps){
+    el('pFlip').value=ps.pFlip; el('edgeBias').value=ps.edgeBias; el('rad').value=ps.rad;
+    el('predEnable').checked=!!ps.predEnable; el('predLambda').value=ps.predLambda; el('predHorizon').value=ps.predHorizon; el('predAlpha').value=ps.predAlpha;
+    el('stepsPerFrame').value=ps.stepsPerFrame; el('topk').value=ps.topk;
+    refreshLabels();
+  }
+  function describeParams(ps){
+    return `pFlip=${ps.pFlip.toFixed(4)} λ=${ps.predLambda.toFixed(2)} Δt=${ps.predHorizon}|α=${ps.predAlpha.toFixed(2)} R=${ps.rad}|TopK=${ps.topk}|spf=${ps.stepsPerFrame}${ps.predEnable? '|pred=ON':''}`;
+  }
+  function clampToBounds(k,v){
+    const [lo,hi]=BOUNDS[k]; v=Math.max(lo,Math.min(hi,v));
+    if(k==='rad'||k==='predHorizon'||k==='stepsPerFrame'||k==='topk') v=Math.round(v);
+    return v;
+  }
+  function proposeTweak(ps){
+    const k = PARAMS_KEYS[(Math.random()*PARAMS_KEYS.length)|0];
+    const [lo,hi]=BOUNDS[k]; const span=hi-lo;
+    let nv;
+    if(k==='predEnable'){
+      nv = (Math.random()<0.15) ? (ps.predEnable?0:1) : ps.predEnable;
+    }else{
+      const amp=OPT.amp;
+      nv = ps[k] + (Math.random()*2-1) * (k==='stepsPerFrame' ? Math.max(20,span*amp) : span*amp);
+    }
+    const out={...ps, [k]: clampToBounds(k,nv)};
+    return out;
+  }
+  function optResetWindows(){ OPT.winFPS.length=0; OPT.winLEN.length=0; }
+  function optPushMetrics(fps,len){
+    if(!OPT.enabled) return;
+    OPT.winFPS.push(fps); OPT.winLEN.push(len);
+    if(OPT.winFPS.length>600) OPT.winFPS.shift();
+    if(OPT.winLEN.length>600) OPT.winLEN.shift();
+  }
+  function avg(arr){ if(!arr.length) return 0; let s=0; for(const v of arr) s+=v; return s/arr.length; }
+  function computeScore(){
+    const avgFPS=avg(OPT.winFPS), avgLEN=avg(OPT.winLEN);
+    OPT.norm.fpsMin=Math.min(OPT.norm.fpsMin, avgFPS); OPT.norm.fpsMax=Math.max(OPT.norm.fpsMax, avgFPS);
+    OPT.norm.lenMin=Math.min(OPT.norm.lenMin, avgLEN); OPT.norm.lenMax=Math.max(OPT.norm.lenMax, avgLEN);
+    let score=0;
+    if(OPT.objective==='PERF'){ score = avgFPS; }
+    else if(OPT.objective==='AVG'){ score = -avgLEN; }
+    else {
+      const fpsDen=Math.max(1e-6, OPT.norm.fpsMax-OPT.norm.fpsMin);
+      const lenDen=Math.max(1e-6, OPT.norm.lenMax-OPT.norm.lenMin);
+      const perfNorm=(avgFPS-OPT.norm.fpsMin)/fpsDen;
+      const lenNorm=(OPT.norm.lenMax-avgLEN)/lenDen;
+      score = OPT.perfWeight*perfNorm + (1-OPT.perfWeight)*lenNorm;
+    }
+    el('soScore').textContent = score.toFixed(4);
+    return score;
+  }
+  function soStep(now){
+    if(!OPT.enabled) return;
+    const interval = OPT.intervalMs;
+    if(now - OPT.lastEvalT < interval) return;
+
+    const score = computeScore();
+    const status = (txt)=>{ el('soStatus').textContent = txt; };
+
+    if(OPT.phase==='BASELINE'){
+      if(OPT.acceptedParams==null){ OPT.acceptedParams = getParamsFromUI(); OPT.acceptedScore = score; OPT.bestParams = {...OPT.acceptedParams}; OPT.bestScore = score; }
+      OPT.candidate = proposeTweak(OPT.acceptedParams);
+      applyParamsToUI(OPT.candidate);
+      optResetWindows();
+      OPT.phase='CANDIDATE';
+      status('trial: candidate applied');
+    } else {
+      const candScore = score;
+      const improve = candScore > OPT.acceptedScore + 1e-6;
+      const explore = Math.random() < OPT.eps;
+      if(improve || explore){
+        OPT.acceptedParams = {...OPT.candidate};
+        OPT.acceptedScore = candScore;
+        if(candScore > OPT.bestScore){ OPT.bestScore=candScore; OPT.bestParams={...OPT.candidate}; el('soBest').textContent=OPT.bestScore.toFixed(4); el('soParams').textContent=describeParams(OPT.bestParams); }
+        status(improve? 'accepted ↑' : 'accepted (ε)');
+      } else {
+        applyParamsToUI(OPT.acceptedParams);
+        status('reverted ↓');
+      }
+      OPT.candidate = proposeTweak(OPT.acceptedParams);
+      applyParamsToUI(OPT.candidate);
+      optResetWindows();
+      OPT.phase='CANDIDATE';
+    }
+    OPT.lastEvalT = now;
+  }
+
+  // ---------- TICK ----------
+  let running=false, lastT=performance.now(), fps=0, accum=0, frames=0;
+  let fpsNow=0;
+  function tick(){
+    tickCount++;
+    meaningfulFlips(numVal(el('pFlip'),0.002), numVal(el('edgeBias'),1.5));
+    if(on(el('q2Enable'))){
+      forEachPixel((x,y,i)=>{ const a=prevRails[i], b=rails[i]; if(a!==b){ const axis=(orient[i]===1)?2:(orient[i]===2)?3:4; q2EmitFlip(x,y,a,b,axis);} });
+    }
+    const rVal = Math.max(1, Math.min(12, numVal(el('rad'),5)));
+    buildRailField(rVal);
+    scheduleTiles();
+    microInterpreterStep(numVal(el('usteps'),8));
+    residualPromote();
+    nnm1_gate(); nnm2_pixelDrift(); nnm3_tileMix(); keepEnergy(); nnm4_domain();
+
+    // Predictive (cadence governed)
+    PRED.enabled = on(el('predEnable'), false);
+    PRED.lambda  = numVal(el('predLambda'), 0.30);
+    PRED.horizon = (numVal(el('predHorizon'), 1)|0);
+    PRED.alpha   = numVal(el('predAlpha'), 0.50);
+    if((tickCount % PERF.predPeriod)===0) predictiveUpdate();
+    el('predMseRail').textContent = PRED.mseRails.toFixed(4);
+    el('predMseSem').textContent  = PRED.mseSem.toFixed(4);
+
+    if(on(el('tspEnable'),true)){
+      TSP.model=costModel.value; TSP.precision=precision.value; TSP.microRange=numVal(atomicRange,5);
+      TSP.dynamic=on(domainDynamic,true); TSP.stepsPerFrame=numVal(stepsPerFrame,400);
+      TSP.autoNNM=on(autoNNM,true);
+      if(!TSP.autoNNM){ TSP.macros=numVal(macroNNM,8)|0; TSP.micros=numVal(microNNM,128)|0; el('macroVal').textContent=TSP.macros; el('microVal').textContent=TSP.micros; }
+      else{ updateNNMAuto(); }
+      if(TSP.dynamic) tspDynamicDrift();
+
+      // Governed 2-opt workload
+      const halfSteps = Math.max(1, Math.floor(TSP.stepsPerFrame * PERF.workScale * 0.5));
+      for (let s = 0; s < halfSteps; s++) twoOptAttempt();
+
+      topKImprove();
+      el('tspLen').textContent=TSP.len.toFixed(2); el('tspBest').textContent=TSP.best.toFixed(2); el('tspAcc').textContent=TSP.accepted.toString(); el('tspAtt').textContent=TSP.attempts.toString(); el('precNow').textContent=currentPrecision();
+    }
+
+    evalLogicTierAware();
+    protoStep();
+
+    if(AG.enabled) agStep();
+
+    draw2D();
+    if ((tickCount % PERF.draw3DSkip) === 0) draw3D();
+    q2UpdatePreview();
+    el('wAllow').textContent=writesAllowed.toString(); el('wGate').textContent=writesGated.toString(); el('wClamp').textContent=writesClamped.toString();
+  }
+  function loop(t){
+    if(running){
+      const dt=t-lastT; lastT=t; accum+=dt; frames++;
+      tick();
+      if(accum>500){ fps=Math.round(frames*1000/accum); accum=0; frames=0; }
+      fpsNow=fps;
+      el('fps').textContent=fps; el('flips').textContent=flipsLast; el('events').textContent=eventsLast; rotY+=0.004;
+      const lenNow = TSP.len||0;
+      optPushMetrics(fpsNow, lenNow);
+      // perf governor each frame
+      perfUpdateGovernor();
+      // optimizer step
+      OPT.enabled = on(el('soEnable'), false);
+      OPT.objective = (el('soObjective')?.value)||'BAL';
+      OPT.perfWeight = numVal(el('soBalance'),0.5);
+      OPT.intervalMs = numVal(el('soInterval'),1.5)*1000;
+      OPT.amp = numVal(el('soExplore'),0.30);
+      OPT.eps = numVal(el('soEps'),0.15);
+      soStep(t);
+    } else { lastT=t; }
+    for(const e of trailEdges) e.life=Math.max(0,e.life-0.016);
+    for(const e of rayEdges) e.life=Math.max(0,e.life-0.016);
+    requestAnimationFrame(loop);
+  }
+
+  // ---------- TSP dynamic drift ----------
+  function tspDynamicDrift(){
+    const step=0.30, jitter=0.15;
+    for(let k=0;k<TSP.N;k++){
+      let {x,y}=TSP.cities[k];
+      const gx=(railField[idx(Math.round(x+1),Math.round(y))*3+0]-railField[idx(Math.round(x-1),Math.round(y))*3+0])*0.5;
+      const gy=(railField[idx(Math.round(x),Math.round(y+1))*3+1]-railField[idx(Math.round(x),Math.round(y-1))*3+1])*0.5;
+      x += step*gx + (Math.random()*2-1)*jitter; y += step*gy + (Math.random()*2-1)*jitter; x=Math.max(0,Math.min(W-1,x)); y=Math.max(0,Math.min(H-1,y));
+      if(!gateAtPixel(idx(Math.round(x),Math.round(y)))){ x=(x+W/7)%W; y=(y+H/5)%H; }
+      if(currentPrecision()==='MACRO'){ x=Math.floor(x/TILE)*TILE+TILE/2; y=Math.floor(y/TILE)*TILE+TILE/2; }
+      TSP.cities[k].x=x; TSP.cities[k].y=y;
+    }
+    TSP.len=tourLength(TSP.tour); if(TSP.len<TSP.best){ TSP.best=TSP.len; pushHist(TSP.len); q2EmitClass(Q2_CLASS.TSPImprove,[[10,Q2_TYPE.UINT3,Math.floor(TSP.len*100)]]); }
+  }
+
+  // ---------- NNMs support ----------
+  function updateNNMAuto(){
+    let active=0, sumBias=0; for(let t=0;t<NT;t++){ if(tileActive[t]) active++; sumBias+=bitBias[t]; }
+    const actFrac=active/NT; const biasAvg=sumBias/NT; const e=Math.min(1,(eventsLast+flipsLast)/600);
+    TSP.macros=Math.max(2,Math.floor(6+42*actFrac)); TSP.micros=Math.max(16,Math.floor(64+448*(0.4*biasAvg+0.6*e)));
+    el('macroNNM').value=TSP.macros; el('microNNM').value=TSP.micros; el('macroVal').textContent=TSP.macros; el('microVal').textContent=TSP.micros;
+  }
+
+  // ---------- UI wiring ----------
+  function refreshLabels(){
+    el('pFlipVal').textContent=(numVal(el('pFlip'))).toFixed(4);
+    el('edgeBiasVal').textContent=(numVal(el('edgeBias'))).toFixed(1);
+    el('radVal').textContent=numVal(el('rad')).toString();
+    el('thrVal').textContent=(numVal(el('thr'))).toFixed(2);
+    el('q2CapVal').textContent=numVal(el('q2Cap'))+' KB';
+    el('ustepsVal').textContent=numVal(el('usteps'));
+    el('ctauAmpVal').textContent=numVal(el('ctauAmp')).toFixed(2);
+    el('atomicVal').textContent=numVal(el('atomicRange'))+'px';
+    el('cityVal').textContent=numVal(el('cities'));
+    el('topkVal').textContent=numVal(el('topk'));
+    el('popVal').textContent=numVal(el('pop'));
+    el('evalVal').textContent=numVal(el('evals'));
+    el('spfVal').textContent=numVal(el('stepsPerFrame'));
+    el('frontNVal').textContent=numVal(el('frontN'));
+    el('predLambdaVal').textContent=numVal(el('predLambda')).toFixed(2);
+    el('predHVal').textContent=numVal(el('predHorizon')).toString();
+    el('predAlphaVal').textContent=numVal(el('predAlpha')).toFixed(2);
+    el('soBalVal').textContent=numVal(el('soBalance')).toFixed(2);
+    el('soIntVal').textContent=numVal(el('soInterval')).toFixed(2)+'s';
+    el('soAmpVal').textContent=(numVal(el('soExplore'))).toFixed(2);
+    el('soEpsVal').textContent=(numVal(el('soEps'))).toFixed(2);
+    el('nodeVal') && (el('nodeVal').textContent='×'+(numVal(el('nodeScale')||{value:1.6},1.6)).toFixed(1));
+  }
+  ['pFlip','edgeBias','rad','thr','usteps','ctauAmp','atomicRange','cities','topk','pop','evals','stepsPerFrame','q2Cap','frontN','predLambda','predHorizon','predAlpha','soBalance','soInterval','soExplore','soEps'].forEach(id=>{
+    const e=el(id); if(e) e.oninput=()=>{ if(id==='q2Cap'){ q2CapBytes=numVal(el('q2Cap'))*1024; q2UpdatePreview(); } refreshLabels(); };
+  });
+
+  el('ecoMode') && (el('ecoMode').onchange = ()=> perfUpdateGovernor());
+
+  el('btnToggle').onclick=()=>{ running=!running; el('btnToggle').textContent=running?'⏸ Pause':'▶ Start'; el('state').textContent=running?'running':'paused'; el('state').style.color=running?'var(--ok)':'#b6c1cc'; };
+  el('btnStep').onclick=()=>{ const was=running; running=false; tick(); if(was) running=true; };
+  el('btnReset').onclick=()=>{ reseedAll(); draw2D(); draw3D(); };
+  el('q2Reset').onclick=()=>{ q2Tokens=[]; q2UpdatePreview(); };
+  el('q2Copy').onclick=()=>{ navigator.clipboard?.writeText(q2CodonString()); const p=el('q2Preview'); if(p) p.textContent='(codons copied)'; };
+  el('q2ClearH').onclick=()=>{ q2ClassHist.clear(); q2UpdatePreview(); };
+  el('quadReseed').onclick=()=>{ reseedQuadrants(); };
+  el('tspReseed').onclick=()=>{ setCityCount(numVal(el('cities'))); initCities(); initTour(); if(AG.enabled) agInit(); };
+  el('tspRestart').onclick=()=>{ initTour(); if(AG.enabled) agInit(); };
+
+  el('soUseBest').onclick=()=>{ if(OPT.bestParams){ applyParamsToUI(OPT.bestParams); refreshLabels(); el('soStatus').textContent='applied best'; } };
+  el('soReset').onclick=()=>{ OPT.phase='BASELINE'; OPT.acceptedParams=null; OPT.acceptedScore=null; OPT.bestParams=null; OPT.bestScore=-Infinity; OPT.norm={fpsMin:Infinity,fpsMax:0,lenMin:Infinity,lenMax:0}; optResetWindows(); el('soBest').textContent='–'; el('soParams').textContent='–'; el('soStatus').textContent='reset'; };
+
+  c3d.addEventListener('mousedown',e=>{dragging=true; lastMouse=[e.clientX,e.clientY];});
+  window.addEventListener('mouseup',()=>dragging=false);
+  window.addEventListener('mousemove',e=>{ if(!dragging) return; const dx=e.clientX-lastMouse[0], dy=e.clientY-lastMouse[1]; lastMouse=[e.clientX,e.clientY]; rotY+=dx*0.005; rotX+=dy*0.005; });
+
+  el('agprcEnable').onchange=()=>{ AG.enabled=on(el('agprcEnable')); if(AG.enabled){ AG.pop=numVal(el('pop'),20); AG.evals=numVal(el('evals'),40); agInit(); } };
+
+  // ---------- Boot ----------
+  function reseedAll(){
+    on(el('meaning'),true) ? buildMeaningful() : buildRandom();
+    smoothSemantic(1);
+    prevRails = new Uint8Array(rails);
+    reseedGates(); reseedQuadrants(); reseedCTau();
+    scheduleTiles();
+    tickCount=0; hsTotal=0; reqEdges=0; ackEdges=0; q2Tokens=[]; q2ClassHist.clear(); q2UpdatePreview();
+    trailEdges.length=0; rayEdges.length=0; residQ.fill(0); residP.fill(0); residS.fill(0);
+    setCityCount(numVal(el('cities'),40)); initCities(); initTour();
+    if(on(el('agprcEnable'))) { AG.enabled=true; AG.pop=numVal(el('pop'),20); AG.evals=numVal(el('evals'),40); agInit(); }
+    PRED.initialized=false; predInitFromCurrent();
+    OPT.phase='BASELINE'; optResetWindows(); OPT.acceptedParams=null; OPT.acceptedScore=null; OPT.bestParams=null; OPT.bestScore=-Infinity;
+  }
+
+  function smoothSemantic(iter=1){
+    for(let k=0;k<iter;k++){
+      forEachPixel((x,y,i)=>{
+        let q=0,p=0,s=0,c=0;
+        for(let dy=-1;dy<=1;dy++) for(let dx=-1;dx<=1;dx++){ const j=idx(x+dx,y+dy); q+=get(j,CH.Q); p+=get(j,CH.P); s+=get(j,CH.S); c++; }
+        set(i,CH.Q,q/c); set(i,CH.P,p/c); set(i,CH.S,s/c);
+      });
+    }
+  }
+
+  refreshLabels(); reseedAll(); draw2D(); draw3D(); perfUpdateGovernor(); requestAnimationFrame(loop);
+
+})();
+</script>
+</body>
+</html>
