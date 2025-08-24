@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8" />
-<title>BNP Sim — TSP + Predictive Modeling + Self-Optimization</title>
+<title>BNP Sim — TSP + Predictive Modeling + Self-Optimization (BNP-TRUE)</title>
 <meta name="viewport" content="width=device-width,initial-scale=1" />
 <style>
   :root{--bg:#0c0f14;--fg:#e7edf5;--muted:#9aa0a6;--panel:#11161c;--accent:#6ee7ff;--ok:#7efc8a;--warn:#ffd166;--mag:#ff6bd6}
@@ -56,6 +56,14 @@
       <input type="text" id="payload" value="BNP">
     </div>
 
+    <h2>BNP Strictness</h2>
+    <label class="inline small"><input type="checkbox" id="strictBNP" checked> Enforce RGBAQP+S (Q/P=coords, S privileged)</label>
+    <label class="inline small"><input type="checkbox" id="quantizeOn" checked> Quantize writes (8-bit)</label>
+    <div class="row small">
+      <label>Precision depth <span class="val" id="precDepthVal"></span></label>
+      <input type="range" id="precDepth" min="1" max="6" step="1" value="3">
+    </div>
+
     <h2>Event model</h2>
     <div class="row">
       <label>Base flip prob / texel <span class="val" id="pFlipVal"></span></label>
@@ -71,15 +79,15 @@
     </div>
 
     <h2>BNP Systems</h2>
-    <label class="inline"><input type="checkbox" id="q2Enable" checked> Q2 Event Bus</label>
+    <label class="inline"><input type="checkbox" id="q2Enable" checked> DNA Event Bus</label>
     <label class="inline small" style="margin-left:18px;"><input type="checkbox" id="q2Morton" checked> Morton region key</label>
     <div class="row">
-      <label>Q2 cap (KB) <span class="val" id="q2CapVal"></span></label>
+      <label>DNA cap (KB) <span class="val" id="q2CapVal"></span></label>
       <input type="range" id="q2Cap" min="1" max="128" step="1" value="16">
     </div>
     <div class="threecol">
-      <button id="q2Reset">Reset Q2</button>
-      <button id="q2Copy">Copy Codons</button>
+      <button id="q2Reset">Reset DNA</button>
+      <button id="q2Copy">Copy DNA Hex</button>
       <button id="q2ClearH">Clear Histogram</button>
     </div>
 
@@ -330,12 +338,12 @@
 
   <div class="canvwrap">
     <div>
-      <canvas id="c2d" width="512" height="512"></"></canvas>
+      <canvas id="c2d" width="512" height="512"></canvas>
       <div class="legend">2D Texture Sheet (RGB). Overlays: scheduler, DomainMask colors, cτ, bitonic, REQ/ACK, AGPRC tours, TSP tour, <b>Predicted rails</b>.</div>
     </div>
     <div>
       <canvas id="c3d" width="512" height="512"></canvas>
-      <div class="legend">3D Semantic Space (Q,P,S → x,y,z) with node graph; TSP edges (cyan) & trails (gold).</div>
+      <div class="legend">3D State Space (x: rail-weighted Q, y: rail-weighted P, z: S) with node graph; TSP edges (cyan) & trails (gold).</div>
     </div>
   </div>
 </div>
@@ -365,6 +373,20 @@
   const set=(i,ch,v)=>sheet[i*6+ch]=v;
   const hash2=(x,y)=>{ let h=(x*374761393 ^ y*668265263)>>>0; h=(h^(h>>>13))*1274126177>>>0; return h>>>0; };
   function forEachPixel(f){ for(let y=0;y<H;y++) for(let x=0;x<W;x++) f(x,y,idx(x,y)); }
+
+  // ---------- Deterministic RNG & Quantization ----------
+  let GLOBAL_SEED = 0xC0FFEE | 0;
+  function xorshift32(seed){ let x = seed|0; return ()=>{ x ^= x<<13; x ^= x>>>17; x ^= x<<5; return (x>>>0)/4294967296; }; }
+  let globalRandFn = xorshift32(GLOBAL_SEED);
+  function setGlobalSeed(seed){ GLOBAL_SEED = seed|0; globalRandFn = xorshift32(GLOBAL_SEED); }
+  function rand01(){ return globalRandFn(); }
+  function randTile(tile, tick, tag=0){ const s = ((tile*374761393) ^ (tick*668265263) ^ (tag*1597334677))|0; return xorshift32(s)(); }
+  function randPixel(i, tick, tag=0){ const s = (((i*1274126177) ^ (tick*2246822519) ^ (tag*3266489917))|0); return xorshift32(s)(); }
+
+  const QUANT={bits:8, mode01:true};
+  function qClamp01(v){ return Math.max(0,Math.min(1,v)); }
+  function qQuantize01(v,b=QUANT.bits){ const m=(1<<b)-1; return Math.round(qClamp01(v)*m)/m; }
+  function qWrite(newVal){ return on(el('quantizeOn'),true) ? qQuantize01(newVal) : qClamp01(newVal); }
 
   // ---------- Perf governor ----------
   const PERF = { eco:true, targetFPS:58, workScale:1, draw3DSkip:1, predPeriod:1, rebuildPeriod:16 };
@@ -444,44 +466,39 @@
   // AGPRC
   const AG={enabled:false, pop:20, evals:40, inds:[], front0:0, lastDelta:0};
 
-  // ---------- Q2 ----------
-  let q2Tokens=[]; let q2CapBytes=16*1024;
-  const Q2_TYPE={TINY2:0, UINT3:1, SYM3:2, NEST:3};
+  // ---------- DNA bus (Q2 -> DNACompound) ----------
+  let dnaBuffer = new Uint8Array(16*1024); // sized by q2Cap
+  let dnaWritePtr = 0;
   const Q2_CLASS={Flip:1, Req:4, Ack:5, Hs:6, TSPImprove:11, TopK:12, AGPick:13, CRCok:14, CRCbad:15, cTau:16, Resid:17};
   const q2ClassHist=new Map();
-  function q2PushTok(t){ q2Tokens.push(t&3); }
-  function q2EmitBase3(n){ if(n===0){ q2PushTok(0); q2PushTok(3); return; } let d=[]; while(n>0){ d.push(n%3); n=Math.floor(n/3);} for(const v of d) q2PushTok(v); q2PushTok(3);}
-  function q2EmitKey(key){ q2EmitBase3(key+1); }
-  function q2BumpClass(c){ q2ClassHist.set(c,(q2ClassHist.get(c)||0)+1); }
-  function q2PackBytes(){ const bytes=new Uint8Array(Math.ceil(q2Tokens.length/4)); for(let i=0;i<q2Tokens.length;i++){ const lane=i&3, bi=i>>2; bytes[bi]|=(q2Tokens[i]&3)<<((3-lane)*2); } return bytes; }
-  function q2CodonString(){ const bytes=q2PackBytes(); return [...bytes].map(b=>b.toString(16).padStart(2,'0')).join(' '); }
+
+  const GateAffinity = { RGB:1<<0, QP:1<<1, S:1<<2, Rails:1<<3 };
+  function dnaReset(){ dnaWritePtr=0; q2ClassHist.clear(); }
+  function dnaPush(bytes){ if(dnaWritePtr+bytes.length>dnaBuffer.length) return; dnaBuffer.set(bytes, dnaWritePtr); dnaWritePtr+=bytes.length; }
+  function dnaPreviewHex(n=256){ return [...dnaBuffer.slice(0, Math.min(n,dnaWritePtr))].map(b=>b.toString(16).padStart(2,'0')).join(' '); }
+  function dnaParity(u16a,u16b){ const v=(u16a^u16b) & 0xFFFF; return v; }
+  function dnaEmitCompound({cls=0, seg=0xA5, tag=0x3C, a=0, b=0, bindKey=0.0, gate=0}){
+    const bytes = new Uint8Array(16);
+    bytes[0]=seg&0xFF; bytes[1]=tag&0xFF;
+    bytes[2]=a&0xFF; bytes[3]=(a>>>8)&0xFF;
+    bytes[4]=b&0xFF; bytes[5]=(b>>>8)&0xFF;
+    const parity = dnaParity(a,b); bytes[6]=parity&0xFF; bytes[7]=(parity>>>8)&0xFF;
+    const f = new DataView(bytes.buffer);
+    f.setFloat32(8, bindKey, true);   // Binding key (float32)
+    f.setUint32(12, gate>>>0, true);  // Gate affinity bits
+    dnaPush(bytes);
+    q2ClassHist.set(cls,(q2ClassHist.get(cls)||0)+1);
+  }
+  function dnaEmitClass(cls, extra={}){ dnaEmitCompound({cls, a:(tickCount%65535), b:cls, bindKey:(extra.tick||0), gate: GateAffinity.S|GateAffinity.Rails }); }
   function q2UpdatePreview(){
-    const bytes=q2PackBytes();
-    const hex=[...bytes].slice(0,256).map(b=>b.toString(16).padStart(2,'0')).join(' ');
-    const elTok=el('q2Tok'); if(elTok) elTok.textContent=q2Tokens.length.toString();
-    const elBytes=el('q2Bytes'); if(elBytes) elBytes.textContent=bytes.length.toString();
-    const elCod=el('q2Codons'); if(elCod) elCod.textContent=(q2Tokens.length).toString();
-    const elPrev=el('q2Preview'); if(elPrev) elPrev.textContent=bytes.length?hex:'(empty)';
+    const elTok=el('q2Tok'); if(elTok) elTok.textContent=(dnaWritePtr).toString();
+    const elBytes=el('q2Bytes'); if(elBytes) elBytes.textContent=(dnaWritePtr).toString();
+    const elCod=el('q2Codons'); if(elCod) elCod.textContent=(dnaWritePtr/16|0).toString();
+    const elPrev=el('q2Preview'); if(elPrev) elPrev.textContent=dnaWritePtr?dnaPreviewHex():'(empty)';
     const kv=[...q2ClassHist.entries()].sort((a,b)=>b[1]-a[1]).slice(0,12).map(([k,v])=>`${k}:${v}`).join('  ');
     const elHist=el('q2Hist'); if(elHist) elHist.textContent=kv||'(empty)';
   }
-  function q2EmitFlip(x,y,a,b,axisKey){
-    if(!on(el('q2Enable'))) return;
-    if(a===b) return;
-    let TYPE, value;
-    if((a===0&&b>0)||(b===0&&a>0)){ TYPE=Q2_TYPE.TINY2; value=(b>0)?1:0; }
-    else{ TYPE=Q2_TYPE.SYM3; const s=Math.min(a,b), t=Math.max(a,b); value=(s===1&&t===2)?1:(s===2&&t===3)?2:3; }
-    q2EmitKey(axisKey); q2PushTok(TYPE); (TYPE===Q2_TYPE.TINY2)?q2PushTok(value):q2EmitBase3(value);
-    if(on(el('q2Morton'))){ q2EmitKey(7); q2PushTok(Q2_TYPE.UINT3); q2EmitBase3(mortonXY(x,y)); }
-    q2EmitKey(6); q2PushTok(Q2_TYPE.UINT3); q2EmitBase3(tickCount%81);
-    q2BumpClass(Q2_CLASS.Flip);
-  }
-  function q2EmitClass(cls, pairs=[]){
-    if(!on(el('q2Enable'))) return;
-    q2EmitKey(5); q2PushTok(Q2_TYPE.SYM3); q2EmitBase3(cls);
-    for(const [k,type,val] of pairs){ q2EmitKey(k); q2PushTok(type); if(type===Q2_TYPE.TINY2) q2PushTok(val); else q2EmitBase3(val); }
-    q2BumpClass(cls);
-  }
+
   function part1by1(n){ n&=0xFFFF; n=(n^(n<<8))&0x00FF00FF; n=(n^(n<<4))&0x0F0F0F0F; n=(n^(n<<2))&0x33333333; n=(n^(n<<1))&0x55555555; return n;}
   function mortonXY(x,y){ return (part1by1(y)<<1)|part1by1(x); }
 
@@ -490,8 +507,17 @@
   function writePayloadIntoS(text){
     const rnd=seedFromString(text||"BNP"); const w=16,h=16, ox=4, oy=4;
     for(let yy=0;yy<h;yy++) for(let xx=0;xx<w;xx++){
-      const i=idx((ox+xx)%W,(oy+yy)%H); const bit = rnd()>0.5?1:0; set(i,CH.S, clamp01(get(i,CH.S) + 0.25*bit));
+      const i=idx((ox+xx)%W,(oy+yy)%H); const bit = rnd()>0.5?1:0; set(i,CH.S, qWrite( clamp01(get(i,CH.S) + 0.25*bit) ));
     }
+  }
+  function initAxialQP(){
+    forEachPixel((x,y,i)=>{
+      const q = (x/(W-1));
+      const r = (y/(H-1));
+      const p = clamp01(1 - q - r + 0.5);
+      set(i,CH.Q, qQuantize01(q));
+      set(i,CH.P, qQuantize01(p));
+    });
   }
   function computeEdgeAndOrientation(){
     let maxMag=1e-6;
@@ -517,22 +543,22 @@
       const dA=(x-A.x)**2+(y-A.y)**2, dB=(x-B.x)**2+(y-B.y)**2, dC=(x-C.x)**2+(y-C.y)**2;
       let wA=Math.exp(-dA*inv2s2), wB=Math.exp(-dB*inv2s2), wC=Math.exp(-dC*inv2s2);
       const s=wA+wB+wC; wA/=s; wB/=s; wC/=s;
-      set(i,CH.Q,wA); set(i,CH.P,wB); set(i,CH.S,clamp01(wC));
+      set(i,CH.Q,wA); set(i,CH.P,wB); set(i,CH.S,qWrite(clamp01(wC)));
       const r=wA*A.col[0]+wB*B.col[0]+wC*C.col[0], g=wA*A.col[1]+wB*B.col[1]+wC*C.col[1], b=wA*A.col[2]+wB*B.col[2];
-      set(i,CH.R,clamp01(r)); set(i,CH.G,clamp01(g)); set(i,CH.B,clamp01(b)); rails[i]=0;
+      set(i,CH.R,qWrite(clamp01(r))); set(i,CH.G,qWrite(clamp01(g))); set(i,CH.B,qWrite(clamp01(b))); rails[i]=0;
     });
     writePayloadIntoS(el('payload')?.value||"BNP");
     computeEdgeAndOrientation();
-    forEachPixel((x,y,i)=>{ const e=edgeMap[i]; if(e>0.25 && Math.random()<0.35*e){ rails[i]=orient[i]; } });
+    forEachPixel((x,y,i)=>{ const e=edgeMap[i]; if(e>0.25 && randPixel(i,0,100)<0.35*e){ rails[i]=orient[i]; } });
   }
   function buildRandom(){
     forEachPixel((x,y,i)=>{
       const r=(Math.sin(x*12.9898+y*78.233)*43758.5453)%1;
       const g=(Math.sin(x*4.12+y*19.11+11.3)*9983.1)%1;
       const b=(Math.sin(x*7.77+y*5.55+3.3)*6007.7)%1;
-      set(i,CH.R,clamp01(r<0?r+1:r)); set(i,CH.G,clamp01(g<0?g+1:g)); set(i,CH.B,clamp01(b<0?b+1:b));
-      set(i,CH.Q,Math.random()); set(i,CH.P,Math.random()); set(i,CH.S,Math.random());
-      rails[i]=(Math.random()<0.03)?(1+(Math.random()*3|0)):0;
+      set(i,CH.R,qWrite(clamp01(r<0?r+1:r))); set(i,CH.G,qWrite(clamp01(g<0?g+1:g))); set(i,CH.B,qWrite(clamp01(b<0?b+1:b)));
+      set(i,CH.Q,qWrite(randPixel(i,0,101))); set(i,CH.P,qWrite(randPixel(i,0,102))); set(i,CH.S,qWrite(randPixel(i,0,103)));
+      rails[i]=(randPixel(i,0,104)<0.03)?(1+((randPixel(i,0,105)*3)|0)):0;
     });
     for(let k=0;k<edgeMap.length;k++){ edgeMap[k]=0; orient[k]=((k&1)?1:2); }
   }
@@ -564,30 +590,33 @@
     const t=tIdx(((i%W)/TILE)|0, (((i/W)|0)/TILE)|0);
     const mask=tileMask(t);
     if(!g){ writesGated++; return oldVal; }
+    // chBit: 0=RGB, 1=QP, 2=S
     if(chBit===0 && !(mask&1)){ writesClamped++; return oldVal; }
-    if(chBit===1 && !(mask&2)){ writesClamped++; return oldVal; }
+    if(chBit===1){ // Q/P read-mostly under strict BNP
+      if(on(el('strictBNP'), true)){ writesClamped++; return oldVal; }
+      if(!(mask&2)){ writesClamped++; return oldVal; }
+    }
     if(chBit===2 && !(mask&4)){ writesClamped++; return oldVal; }
-    writesAllowed++; return newVal;
+    writesAllowed++; return qWrite(newVal);
   }
 
   // ---------- Rails / flips ----------
   let flipsLast=0, eventsLast=0, tickCount=0;
 
-  // PERF: record flips, reuse prevRails buffer
   function meaningfulFlips(baseProb,biasMul){
     flipsLast=0; prevRails.set(rails);
     lastFlipsIdx.length = 0;
     forEachPixel((x,y,i)=>{
       const p = baseProb * (0.25 + biasMul * edgeMap[i]);
-      if(Math.random()<p){
-        const prev=rails[i]; let v = (prev!==0) ? 0 : orient[i]; if(v===0) v=1+(Math.random()*3|0);
+      if(randPixel(i, tickCount, 11) < p){
+        const prev=rails[i];
+        let v = (prev!==0) ? 0 : orient[i]; if(v===0) v=1+((randPixel(i,tickCount,12)*3)|0);
         if(on(el('gateEnable'),true) && on(el('gateRails')||{checked:true},true) && !gateAtPixel(i)) v=prev;
         if(v!==prev){ rails[i]=v; flipsLast++; lastFlipsIdx.push(i); }
       }
     });
   }
 
-  // PERF: full and incremental rail field
   function buildRailFieldFull(R){
     railField.fill(0); let events=0;
     const ker = kernelForR(R);
@@ -663,7 +692,7 @@
     el('stageCount').textContent=stageCountVal.toString(); el('swapCount').textContent=swapCountLive.toString();
   }
 
-  // ---------- Logic fusion (FIXED) ----------
+  // ---------- Logic fusion (unchanged functional behavior) ----------
   function evalLogicTierAware(){
     if(!on(el('logicEnable'),true)) return;
     const T=numVal(el('thr'),0.42);
@@ -717,62 +746,85 @@
         tileB[iTile]=(bSoft>=T)?1:0;
         tileC[iTile]=(cSoft>=T)?1:0;
 
-        // outputs for FA/HA/MAJ can be derived later if you want to show SUM/CARRY
-        // (kept here for future use)
         tileSUM[iTile] = (tileA[iTile]^tileB[iTile]) ^ tileC[iTile];
         const maj = (tileA[iTile]+tileB[iTile]+tileC[iTile])>=2 ? 1:0;
         tileCAR[iTile] = maj;
 
-        // Directional flow follows dominant rail lane
         const m = Math.max(rx, ry, rz);
         tileFlow[iTile] = (m===rx)?1:(m===ry)?2:3;
 
-        // Semantic position for 3D map
         tilePos[iTile*3+0]=qA; tilePos[iTile*3+1]=pA; tilePos[iTile*3+2]=sA;
       }
     }
   }
 
-  // ---------- cτ & Interpreter ----------
-  function reseedCTau(){
-    for(let t=0;t<NT;t++){ cTau[t]=0.5 + 1.0*(hash2(t,~t)%1000)/1000 * numVal(el('ctauAmp'),0.5); }
-  }
-  function microInterpreterStep(steps){
+  // ---------- Micro Interpreter (BNP VM) ----------
+  const OPC={ NOP:0, LOAD_TILE:1, MAD:2, SOFTMAX3:3, REDUCE3:4, WRITE_S:5, JNZ:6, HALT:7 };
+  const DEFAULT_PROGRAM = [
+    [OPC.LOAD_TILE, 0, CH.Q], [OPC.LOAD_TILE, 1, CH.P], [OPC.LOAD_TILE, 2, CH.S],
+    [OPC.SOFTMAX3, 3, 0, 1, 2],
+    [OPC.MAD, 2, 2, 0, 0.85],
+    [OPC.REDUCE3, 4, 0, 1, 2],
+    [OPC.MAD, 2, 2, 4, 0.15],
+    [OPC.WRITE_S, 2],
+    [OPC.HALT]
+  ];
+
+  function microInterpreterStep(userSteps){
     if(!on(el('intpEnable'),true)) return;
     microHistBins.fill(0);
+    const depth = numVal(el('precDepth'), 3);
+    const cAmp  = numVal(el('ctauAmp'), 0.5);
+
     let regEnergyAcc=0;
     for(let t=0;t<NT;t++){
       if(!tileActive[t]) continue;
-      const tx=t%TX, ty=(t/TX)|0;
-      let qA=0,pA=0,sA=0,c=0;
-      for(let y=0;y<TILE;y++) for(let x=0;x<TILE;x++){ const i=idx(tx*TILE+x,ty*TILE+y); qA+=get(i,CH.Q); pA+=get(i,CH.P); sA+=get(i,CH.S); c++; }
-      qA/=c; pA/=c; sA/=c;
-      let r0=qA, r1=pA, r2=sA, r3=1;
-      const ct=cTau[t]||1;
-      const iters=Math.max(1, Math.floor(steps*ct));
-      for(let u=0;u<iters;u++){
-        r0 = clamp01(r0 + 0.15*(r1 - r0));
-        r1 = clamp01(r1 + 0.12*(r2 - r1));
-        const k0=0.8, k1=0.5, k2=0.3;
-        const d0=r0*k0 + r1*(1-k0), d1=r0*k1 + r1*(1-k1), d2=r0*k2 + r1*(1-k2);
-        const ex0=Math.exp(d0), ex1=Math.exp(d1), ex2=Math.exp(d2), Z=ex0+ex1+ex2;
-        const att0=ex0/Z, att1=ex1/Z, att2=ex2/Z;
-        r2 = clamp01( r2*0.85 + 0.15*(att0*qA + att1*pA + att2*sA) );
-      }
-      if(on(el('privS'),true)){
-        if((tileMask(t)&4)===0){ /* no write */ }
-        else{
-          for(let y=0;y<TILE;y++) for(let x=0;x<TILE;x++){
-            const i=idx(tx*TILE+x,ty*TILE+y);
-            const cur=get(i,CH.S), nv=lerp(cur, r2, 0.10);
-            set(i,CH.S, applyDomain(cur,nv,i,2));
+
+      let R = new Float32Array(8);
+      const iters = Math.max(1, Math.round(depth * (0.5 + cAmp*(cTau[t] - 0.5))));
+      microHistBins[Math.min(7, iters-1)]++;
+
+      for(let pass=0; pass<iters; pass++){
+        PROG: for(const ins of DEFAULT_PROGRAM){
+          const op = ins[0];
+          if(op===OPC.HALT) break PROG;
+
+          if(op===OPC.LOAD_TILE){
+            const [_, rd, ch] = ins;
+            let acc=0, c=0;
+            const tx=t%TX, ty=(t/TX)|0;
+            for(let y=0;y<TILE;y++) for(let x=0;x<TILE;x++){ const i=idx(tx*TILE+x,ty*TILE+y); acc+=get(i,ch); c++; }
+            R[rd]=acc/Math.max(1,c);
           }
-          q2EmitClass(Q2_CLASS.cTau, [[6,Q2_TYPE.UINT3,tickCount%81]]);
+          else if(op===OPC.MAD){
+            const [_, rd, a, b, k] = ins;
+            R[rd] = clamp01(R[a]*k + R[b]);
+          }
+          else if(op===OPC.SOFTMAX3){
+            const [_, rd, a,b,c] = ins;
+            const ex0=Math.exp(R[a]), ex1=Math.exp(R[b]), ex2=Math.exp(R[c]); const Z=ex0+ex1+ex2+1e-9;
+            R[rd+0]=ex0/Z; R[rd+1]=ex1/Z; R[rd+2]=ex2/Z;
+          }
+          else if(op===OPC.REDUCE3){
+            const [_, rd, a,b,c] = ins;
+            R[rd]=(R[a]+R[b]+R[c])/3;
+          }
+          else if(op===OPC.WRITE_S){
+            const [_, rs] = ins;
+            const tx=t%TX, ty=(t/TX)|0;
+            if(on(el('privS'),true)){
+              for(let y=0;y<TILE;y++) for(let x=0;x<TILE;x++){
+                const i=idx(tx*TILE+x,ty*TILE+y);
+                const cur=get(i,CH.S), nv=lerp(cur, R[rs], 0.10);
+                set(i,CH.S, applyDomain(cur, nv, i, 2));
+              }
+              dnaEmitClass(Q2_CLASS.cTau, {tick:tickCount});
+            }
+          }
         }
       }
-      const e = r0*r0 + r1*r1 + r2*r2 + r3*r3;
+      const e = R[0]*R[0] + R[1]*R[1] + R[2]*R[2] + 1.0;
       regEnergyTile[t]=e; regEnergyAcc+=e;
-      const bin=Math.max(0,Math.min(7,Math.floor((iters-1)/4))); microHistBins[bin]++;
     }
     el('regEnergy').textContent=(regEnergyAcc/Math.max(1,NT)).toFixed(3);
     el('microHist').textContent=[...microHistBins].join(',');
@@ -792,7 +844,7 @@
         residQ[t]=clamp01(residQ[t] + 0.02*(sx-0.5));
         residP[t]=clamp01(residP[t] + 0.02*(sy-0.5));
         residS[t]=clamp01(residS[t] + 0.02*(sz-0.5));
-        q2EmitClass(Q2_CLASS.Resid, [[8,Q2_TYPE.UINT3,t],[6,Q2_TYPE.UINT3,tickCount%81]]);
+        dnaEmitClass(Q2_CLASS.Resid, {tick:tickCount});
       }
     }
   }
@@ -808,7 +860,7 @@
         const fR=clampGain(1 + gain*(gx - (gy+gz)/2));
         const fG=clampGain(1 + gain*(gy - (gx+gz)/2));
         const fB=clampGain(1 + gain*(gz - (gx+gy)/2));
-        const nR=clamp01(get(i,CH.R)*fR), nG=clamp01(get(i,CH.G)*fG), nB=clamp01(get(i,CH.B)*fB);
+        const nR=qWrite(get(i,CH.R)*fR), nG=qWrite(get(i,CH.G)*fG), nB=qWrite(get(i,CH.B)*fB);
         set(i,CH.R, applyDomain(get(i,CH.R), nR, i, 0));
         set(i,CH.G, applyDomain(get(i,CH.G), nG, i, 0));
         set(i,CH.B, applyDomain(get(i,CH.B), nB, i, 0));
@@ -823,9 +875,9 @@
         let r=0,g=0,b=0,c=0;
         for(let dy=-1;dy<=1;dy++) for(let dx=-1;dx<=1;dx++){ const j=idx(x+dx,y+dy); r+=get(j,CH.R); g+=get(j,CH.G); b+=get(j,CH.B); c++; }
         const nR=lerp(get(i,CH.R), r/c, ctBlend), nG=lerp(get(i,CH.G), g/c, ctBlend), nB=lerp(get(i,CH.B), b/c, ctBlend);
-        set(i,CH.R, applyDomain(get(i,CH.R), nR, i, 0));
-        set(i,CH.G, applyDomain(get(i,CH.G), nG, i, 0));
-        set(i,CH.B, applyDomain(get(i,CH.B), nB, i, 0));
+        set(i,CH.R, applyDomain(get(i,CH.R), qWrite(nR), i, 0));
+        set(i,CH.G, applyDomain(get(i,CH.G), qWrite(nG), i, 0));
+        set(i,CH.B, applyDomain(get(i,CH.B), qWrite(nB), i, 0));
       });
     });
   }
@@ -837,9 +889,9 @@
       const soft=(0.03+0.10*mag), cx=tx*TILE+TILE/2, cy=ty*TILE+TILE/2;
       forEachPx(tx,ty,(i,px,py)=>{
         const dx=Math.abs(px-cx)/(TILE/2), dy=Math.abs(py-cy)/(TILE/2); const w=hann(Math.max(dx,dy)), t=w*soft;
-        set(i,CH.R, applyDomain(get(i,CH.R), lerp(get(i,CH.R), r, t), i, 0));
-        set(i,CH.G, applyDomain(get(i,CH.G), lerp(get(i,CH.G), g, t), i, 0));
-        set(i,CH.B, applyDomain(get(i,CH.B), lerp(get(i,CH.B), b, t), i, 0));
+        set(i,CH.R, applyDomain(get(i,CH.R), qWrite(lerp(get(i,CH.R), r, t)), i, 0));
+        set(i,CH.G, applyDomain(get(i,CH.G), qWrite(lerp(get(i,CH.G), g, t)), i, 0));
+        set(i,CH.B, applyDomain(get(i,CH.B), qWrite(lerp(get(i,CH.B), b, t)), i, 0));
       });
     });
   }
@@ -848,10 +900,17 @@
       let sx=0,sy=0,sz=0,c=0;
       forEachPx(tx,ty,(i)=>{ sx+=railField[i*3+0]; sy+=railField[i*3+1]; sz+=railField[i*3+2]; c++;});
       const ax=clamp01(sx/c), ay=clamp01(sy/c), az=clamp01(sz/c);
-      const blend=0.16;
+      if(on(el('strictBNP'), true)){
+        forEachPx(tx,ty,(i)=>{
+          const sN=lerp(get(i,CH.S), az + 0.25*residS[tIdx(tx,ty)], 0.05);
+          set(i,CH.S, on(el('privS'),true) ? applyDomain(get(i,CH.S), sN, i, 2) : get(i,CH.S));
+        });
+        return;
+      }
+      // Non-strict mode: legacy gentle nudges to Q/P allowed (kept for experimentation)
       forEachPx(tx,ty,(i)=>{
-        set(i,CH.Q, applyDomain(get(i,CH.Q), lerp(get(i,CH.Q), ax + 0.25*residQ[tIdx(tx,ty)], blend), i, 1));
-        set(i,CH.P, applyDomain(get(i,CH.P), lerp(get(i,CH.P), ay + 0.25*residP[tIdx(tx,ty)], blend), i, 1));
+        set(i,CH.Q, applyDomain(get(i,CH.Q), lerp(get(i,CH.Q), ax + 0.25*residQ[tIdx(tx,ty)], 0.16), i, 1));
+        set(i,CH.P, applyDomain(get(i,CH.P), lerp(get(i,CH.P), ay + 0.25*residP[tIdx(tx,ty)], 0.16), i, 1));
         const sN=lerp(get(i,CH.S), az + 0.25*residS[tIdx(tx,ty)], 0.05);
         set(i,CH.S, on(el('privS'),true) ? applyDomain(get(i,CH.S), sN, i, 2) : get(i,CH.S));
       });
@@ -862,7 +921,7 @@
       const target=0.55, alphaK=0.03;
       forEachPx(tx,ty,(i)=>{
         const r=get(i,CH.R), g=get(i,CH.G), b=get(i,CH.B); const L=0.2126*r+0.7152*g+0.0722*b; const scale=1+alphaK*(target-L);
-        const nR=clamp01(r*scale), nG=clamp01(g*scale), nB=clamp01(b*scale);
+        const nR=qWrite(r*scale), nG=qWrite(g*scale), nB=qWrite(b*scale);
         set(i,CH.R, applyDomain(r, nR, i, 0)); set(i,CH.G, applyDomain(g, nG, i, 0)); set(i,CH.B, applyDomain(b, nB, i, 0));
       });
     });
@@ -873,41 +932,35 @@
   const reqNow=new Uint8Array(NT), ackNow=new Uint8Array(NT);
   const partner=new Int32Array(NT);
   let hsTotal=0, reqEdges=0, ackEdges=0;
-  function q2EmitProto(tile, kindCode , peer){
-    if(!on(el('q2Enable'))) return;
-    q2EmitKey(5); q2PushTok(Q2_TYPE.SYM3); q2EmitBase3(kindCode);
-    q2EmitKey(8); q2PushTok(Q2_TYPE.UINT3); q2EmitBase3(tile);
-    q2EmitKey(9); q2PushTok(Q2_TYPE.UINT3); q2EmitBase3(Math.max(0,peer|0));
-    q2EmitKey(6); q2PushTok(Q2_TYPE.UINT3); q2EmitBase3(tickCount % 243);
-    q2BumpClass(kindCode);
-  }
   function protoStep(){
     reqPrev.set(reqNow); ackPrev.set(ackNow); reqNow.fill(0); ackNow.fill(0);
     const startP=numVal(el('protoStart'),0.01), faultP=numVal(el('faultPct'),5)/100;
     if(on(el('protoEnable'),true)){
       for(let t=0;t<NT;t++){
-        if(Math.random()<startP*bitBias[t]){
-          const tx=t%TX, ty=(t/TX)|0; const nbr = (Math.random()<0.6)? tIdx((tx+1)%TX,ty) : tIdx(tx,(ty+1)%TY);
-          if(Math.random()>=faultP){ reqNow[t]=1; partner[t]=nbr; }
+        if(randTile(t,tickCount,201)<startP*bitBias[t]){
+          const tx=t%TX, ty=(t/TX)|0; const nbr = (randTile(t,tickCount,202)<0.6)? tIdx((tx+1)%TX,ty) : tIdx(tx,(ty+1)%TY);
+          if(randTile(t,tickCount,203)>=faultP){ reqNow[t]=1; partner[t]=nbr; }
         }
       }
       for(let t=0;t<NT;t++){
         let got=-1; const tx=t%TX, ty=(t/TX)|0;
         const neighbors=[tIdx((tx-1+TX)%TX,ty), tIdx((tx+1)%TX,ty), tIdx(tx,(ty-1+TY)%TY), tIdx(tx,(ty+1)%TY)];
         for(const n of neighbors){ if(reqNow[n] && partner[n]===t){ got=n; break; } }
-        if(got>=0 && Math.random()>=faultP){ ackNow[t]=1; partner[t]=got; }
+        if(got>=0 && randTile(t,tickCount,204)>=faultP){ ackNow[t]=1; partner[t]=got; }
       }
       for(let t=0;t<NT;t++){
         if(reqNow[t]){ const dst=partner[t]; if(ackNow[dst] && partner[dst]===t){
-          hsTotal++; q2EmitProto(t,Q2_CLASS.Hs,dst); q2EmitProto(dst,Q2_CLASS.Hs,t);
+          hsTotal++;
+          dnaEmitCompound({cls:Q2_CLASS.Hs, a:t, b:dst, bindKey:tickCount, gate: GateAffinity.S|GateAffinity.Rails});
+          dnaEmitCompound({cls:Q2_CLASS.Hs, a:dst, b:t, bindKey:tickCount, gate: GateAffinity.S|GateAffinity.Rails});
           const ttl= numVal(el('trailSec')||{value:6},6); trailEdges.push({u:t,v:dst,life:ttl,ttl}); while(trailEdges.length>MAX_TRAILS) trailEdges.shift();
           reqNow[t]=0; ackNow[dst]=0; } }
       }
     }
     let rEdge=0, aEdge=0;
     for(let t=0;t<NT;t++){
-      if(reqNow[t] && !reqPrev[t]){ rEdge++; q2EmitProto(t,Q2_CLASS.Req,partner[t]); }
-      if(ackNow[t] && !ackPrev[t]){ aEdge++; q2EmitProto(t,Q2_CLASS.Ack,partner[t]); }
+      if(reqNow[t] && !reqPrev[t]){ rEdge++; dnaEmitClass(Q2_CLASS.Req, {tick:tickCount}); }
+      if(ackNow[t] && !ackPrev[t]){ aEdge++; dnaEmitClass(Q2_CLASS.Ack, {tick:tickCount}); }
     }
     reqEdges+=rEdge; ackEdges+=aEdge;
     el('hsCount').textContent=hsTotal; el('reqEdges').textContent=reqEdges; el('ackEdges').textContent=ackEdges;
@@ -932,6 +985,19 @@
   const prevRF=new Float32Array(W*H*3), vRF=new Float32Array(W*H*3), pRF=new Float32Array(W*H*3), lastPRF=new Float32Array(W*H*3);
   const predEdge=new Float32Array(W*H);
 
+  function computeEdgeFromS(Sarr,out){
+    let maxMag=1e-6;
+    for(let y=0;y<H;y++){
+      for(let x=0;x<W;x++){
+        const i=idx(x,y), xr=(x+1)%W, xl=(x-1+W)%W, yu=(y-1+H)%H, yd=(y+1)%H;
+        const dSdx=(Sarr[idx(xr,y)]-Sarr[idx(xl,y)])*0.5;
+        const dSdy=(Sarr[idx(x,yu)]-Sarr[idx(x,yd)])*0.5;
+        const mag=Math.hypot(Math.abs(dSdx),Math.abs(dSdy)); out[i]=mag; if(mag>maxMag) maxMag=mag;
+      }
+    }
+    const inv=1/maxMag; for(let i=0;i<out.length;i++) out[i]=Math.min(1,out[i]*inv);
+  }
+
   function predInitFromCurrent(){
     forEachPixel((x,y,i)=>{
       prevQ[i]=get(i,CH.Q); prevP[i]=get(i,CH.P); prevS[i]=get(i,CH.S);
@@ -940,38 +1006,20 @@
       vQ[i]=vP[i]=vS[i]=0;
     });
     for(let k=0;k<railField.length;k++){ prevRF[k]=railField[k]; pRF[k]=railField[k]; lastPRF[k]=railField[k]; vRF[k]=0; }
-    computeEdgeFromQPS(pQ,pP,pS,predEdge);
+    computeEdgeFromS(pS,predEdge);
     PRED.initialized=true;
-  }
-
-  function computeEdgeFromQPS(Q,P,S,out){
-    let maxMag=1e-6;
-    for(let y=0;y<H;y++){
-      for(let x=0;x<W;x++){
-        const i=idx(x,y), xr=(x+1)%W, xl=(x-1+W)%W, yu=(y-1+H)%H, yd=(y+1)%H;
-        const dQdx=(Q[idx(xr,y)]-Q[idx(xl,y)])*0.5, dQdy=(Q[idx(x,yu)]-Q[idx(x,yd)])*0.5;
-        const dPdx=(P[idx(xr,y)]-P[idx(xl,y)])*0.5, dPdy=(P[idx(x,yu)]-P[idx(x,yd)])*0.5;
-        const dSdx=(S[idx(xr,y)]-S[idx(xl,y)])*0.5, dSdy=(S[idx(x,yu)]-S[idx(x,yd)])*0.5;
-        const dxm=Math.abs(dQdx)+Math.abs(dPdx)+Math.abs(dSdx);
-        const dym=Math.abs(dQdy)+Math.abs(dPdy)+Math.abs(dSdy);
-        const mag=Math.hypot(dxm,dym); out[i]=mag; if(mag>maxMag) maxMag=mag;
-      }
-    }
-    const inv=1/maxMag; for(let i=0;i<out.length;i++) out[i]=Math.min(1,out[i]*inv);
   }
 
   function predictiveUpdate(){
     if(!PRED.enabled){ PRED.mseRails=0; PRED.mseSem=0; PRED.initialized=false; return; }
     if(!PRED.initialized) predInitFromCurrent();
 
-    // 1) Compute prediction error vs last predicted fields (arrived now)
+    // 1) Prediction error: S-only semantics vs last predicted S
     let eR=0, eS=0, n=W*H;
     for(let i=0;i<n;i++){
-      const q=get(i,CH.Q), p=get(i,CH.P), s=get(i,CH.S);
-      const [qf,pf,sf]=frameMap(q,p,s);
-      const [qfp,pfp,sfp]=frameMap(lastPQ[i], lastPP[i], lastPS[i]);
-      const semNow=(qf*pf + pf*sf + qf*sf)/3, semPred=(qfp*pfp + pfp*sfp + qfp*sfp)/3;
-      const dS=semNow - semPred; eS += dS*dS;
+      const s=get(i,CH.S);
+      const sPred = lastPS[i];
+      const dS=s - sPred; eS += dS*dS;
     }
     for(let k=0;k<railField.length;k++){
       const d=railField[k] - lastPRF[k]; eR += d*d;
@@ -994,7 +1042,7 @@
       pRF[k] = clamp01(railField[k] + h*vRF[k]);
       prevRF[k]=railField[k];
     }
-    computeEdgeFromQPS(pQ,pP,pS,predEdge);
+    computeEdgeFromS(pS,predEdge);
 
     // 3) Store predictions for next-tick error calc
     lastPQ.set(pQ); lastPP.set(pP); lastPS.set(pS); lastPRF.set(pRF);
@@ -1007,10 +1055,8 @@
         tspLen=el('tspLen'), tspBest=el('tspBest'), tspAcc=el('tspAcc'), tspAtt=el('tspAtt'), precNow=el('precNow');
 
   function setCityCount(n){ TSP.N=Math.max(6,Math.min(160,n|0)); cityVal.textContent=TSP.N; }
-  function euclid(a,b){ const dx=a.x+bias0(a)-b.x-bias1(b), dy=a.y+bias0(a)-b.y-bias1(b); return Math.hypot(dx,dy); }
+  function euclid(a,b){ const dx=a.x-b.x, dy=a.y-b.y; return Math.hypot(dx,dy); }
   function bias0(){return 0} function bias1(){return 0}
-
-  const pP_ = pP;
 
   function segmentCost(a,b,prec,model){
     const base=Math.hypot(a.x-b.x, a.y-b.y);
@@ -1022,15 +1068,13 @@
     let accRailN=0, accEdgeN=0, accSemN=0;
     for(let si=0;si<samples;si++){
       let t=(si+0.5)/samples; let x=a.x+(b.x-a.x)*t, y=a.y+(b.y-a.y)*t;
-      if(jitter>0){ const jx=(Math.random()*2-1)*jitter, jy=(Math.random()*2-1)*jitter; x=clamp01((x+jx)/W)*W; y=clamp01((y+jy)/H)*H; }
+      if(jitter>0){ const jx=(randTile(si,tickCount,21)*2-1)*jitter, jy=(randTile(si+999,tickCount,22)*2-1)*jitter; x=clamp01((x+jx)/W)*W; y=clamp01((y+jy)/H)*H; }
       const ii=idx(Math.round(x),Math.round(y)); const tix=tIdx((x/TILE)|0,(y/TILE)|0);
 
       const rMagN=railField[ii*3+0]+railField[ii*3+1]+railField[ii*3+2];
       const eN=edgeMap[ii];
-      let q=get(ii,CH.Q), p=get(ii,CH.P), s=get(ii,CH.S);
-      q=clamp01(q+0.2*residQ[tix]); p=clamp01(p+0.2*residP[tix]); s=clamp01(s+0.2*residS[tix]);
-      const [qf,pf,sf]=frameMap(q,p,s);
-      const semN=(qf*pf + pf*sf + qf*sf)/3;
+      const s = get(ii,CH.S);
+      const semN = s;
 
       accRailN+=rMagN; accEdgeN+=eN; accSemN+=semN;
     }
@@ -1046,16 +1090,11 @@
     let accRailP=0, accEdgeP=0, accSemP=0;
     for(let si=0;si<samples;si++){
       let t=(si+0.5)/samples; let x=a.x+(b.x-a.x)*t, y=a.y+(b.y-a.y)*t;
-      if(jitter>0){ const jx=(Math.random()*2-1)*jitter, jy=(Math.random()*2-1)*jitter; x=clamp01((x+jx)/W)*W; y=clamp01((y+jy)/H)*H; }
-      const ii=idx(Math.round(x),Math.round(y)); const tix=tIdx((x/TILE)|0,(y/TILE)|0);
-
+      if(jitter>0){ const jx=(randTile(si,tickCount,23)*2-1)*jitter, jy=(randTile(si+777,tickCount,24)*2-1)*jitter; x=clamp01((x+jx)/W)*W; y=clamp01((y+jy)/H)*H; }
+      const ii=idx(Math.round(x),Math.round(y));
       const rMagP=pRF[ii*3+0]+pRF[ii*3+1]+pRF[ii*3+2];
       const eP=predEdge[ii];
-
-      let q=pQ[ii], p=pP_[ii], s=pS[ii];
-      q=clamp01(q+0.2*residQ[tix]); p=clamp01(p+0.2*residP[tix]); s=clamp01(s+0.2*residS[tix]);
-      const [qf,pf,sf]=frameMap(q,p,s);
-      const semP=(qf*pf + pf*sf + qf*sf)/3;
+      const semP=pS[ii];
 
       accRailP+=rMagP; accEdgeP+=eP; accSemP+=semP;
     }
@@ -1099,16 +1138,15 @@
   }
   function pushHist(v){ TSP.history.push(v); if(TSP.history.length>240) TSP.history.shift(); }
 
-  // 2-opt + Top-K
   function twoOptAttempt(){ const N=TSP.N; if(N<6) return false;
-    const i=(Math.random()*N)|0; let j=(i+2+((Math.random()*(N-3))|0))%N; if(j===0) j=1;
+    const i=(randTile(5,tickCount,251)*N)|0; let j=(i+2+((randTile(6,tickCount,252)*(N-3))|0))%N; if(j===0) j=1;
     const i1=(i+1)%N,j1=(j+1)%N; const order=TSP.tour;
     const a=order[i], b=order[i1], c=order[j], d=order[j1]; const model=TSP.model, prec=currentPrecision();
     const old=edgeCost(a,b,prec,model)+edgeCost(c,d,prec,model); const neu=edgeCost(a,c,prec,model)+edgeCost(b,d,prec,model); TSP.attempts++;
     if(neu+1e-9<old){
       if(i1<j){ for(let p=i1,q=j;p<q;p++,q--){ const tmp=order[p]; order[p]=order[q]; order[q]=tmp; } }
       else { const seg=[]; let p=i1; while(true){ seg.push(order[p]); if(p===j) break; p=(p+1)%N; } seg.reverse(); p=i1; let si=0; while(true){ order[p]=seg[si++]; if(p===j) break; p=(p+1)%N; } }
-      const newLen=TSP.len-old+neu; TSP.len=newLen; if(newLen<TSP.best){ TSP.best=newLen; q2EmitClass(Q2_CLASS.TSPImprove,[[10,Q2_TYPE.UINT3,Math.floor(newLen*100)]]); }
+      const newLen=TSP.len-old+neu; TSP.len=newLen; if(newLen<TSP.best){ TSP.best=newLen; dnaEmitClass(Q2_CLASS.TSPImprove,{tick:tickCount}); }
       TSP.accepted++; pushHist(TSP.len); addTspTrailEdges(a,c); addTspTrailEdges(b,d); return true; } return false; }
   function topKImprove(){
     if(!on(el('topkEnable'),true)) return;
@@ -1116,7 +1154,7 @@
     const N=TSP.N, order=TSP.tour, model=TSP.model, prec=currentPrecision();
     let cands=[];
     for(let k=0;k<K;k++){
-      const i=(Math.random()*N)|0; let j=(i+2+((Math.random()*(N-3))|0))%N; if(j===0) j=1;
+      const i=(randTile(7,tickCount,261)*N)|0; let j=(i+2+((randTile(8,tickCount,262)*(N-3))|0))%N; if(j===0) j=1;
       const i1=(i+1)%N,j1=(j+1)%N; const a=order[i], b=order[i1], c=order[j], d=order[j1];
       const old=edgeCost(a,b,prec,model)+edgeCost(c,d,prec,model); const neu=edgeCost(a,c,prec,model)+edgeCost(b,d,prec,model);
       cands.push({i,j,i1,j1,delta:neu-old, a,b,c,d});
@@ -1129,17 +1167,17 @@
       TSP.len = tourLength(order);
       if(TSP.len<TSP.best){ TSP.best=TSP.len; }
       addTspTrailEdges(C.a,C.c); addTspTrailEdges(C.b,C.d);
-      q2EmitClass(Q2_CLASS.TopK, [[10,Q2_TYPE.UINT3, Math.floor(TSP.len*100)]]);
+      dnaEmitClass(Q2_CLASS.TopK,{tick:tickCount});
       TSP.topkLast = C.delta;
     } else { TSP.topkLast = 0; }
   }
 
-  // AGPRC (light NSGA-II)
+  // AGPRC (with crowding)
   function agInit(){
     AG.inds.length=0;
     for(let i=0;i<AG.pop;i++){
       const ord=Array.from(TSP.tour);
-      for(let s=0;s<ord.length;s++){ const a=(Math.random()*ord.length)|0, b=(Math.random()*(ord.length)|0); const t=ord[a]; ord[a]=ord[b]; ord[b]=t; }
+      for(let s=0;s<ord.length;s++){ const a=(randTile(s,tickCount,271)*ord.length)|0, b=(randTile(s+777,tickCount,272)*ord.length|0); const t=ord[a]; ord[a]=ord[b]; ord[b]=t; }
       AG.inds.push({order:ord, f:[0,0,0]});
     }
     agEvalAll();
@@ -1152,7 +1190,7 @@
         const a=TSP.cities[ind.order[k]];
         const ii=idx(Math.round(a.x),Math.round(a.y));
         railA+= (railField[ii*3+0]+railField[ii*3+1]+railField[ii*3+2]);
-        const [q,p,s]=[get(ii,CH.Q),get(ii,CH.P),get(ii,CH.S)]; semH+=(q*p+p*s+q*s)/3;
+        const s=get(ii,CH.S); semH+=s;
       }
       railA/=N; semH/=N;
       ind.f=[L, (1-railA), (1-clamp01(semH))];
@@ -1171,35 +1209,60 @@
     AG.front0 = fronts[0]?.length||0;
     return {rank, fronts: fronts.filter(f=>f.length)};
   }
+  function crowdingDistance(front, inds){
+    const m=3; const n=front.length; if(n===0) return new Array(0);
+    const dist=new Array(n).fill(0);
+    for(let obj=0; obj<m; obj++){
+      const idxs=[...front].sort((ia,ib)=>inds[ia].f[obj]-inds[ib].f[obj]);
+      const fmin=inds[idxs[0]].f[obj], fmax=inds[idxs[n-1]].f[obj], den=(fmax-fmin)||1e-9;
+      dist[idxs[0]]=dist[idxs[n-1]]=Infinity;
+      for(let k=1;k<n-1;k++){
+        dist[idxs[k]] += (inds[idxs[k+1]].f[obj] - inds[idxs[k-1]].f[obj]) / den;
+      }
+    }
+    return dist;
+  }
+  function binaryTournament(cands, rank, crowd){
+    const a=cands[(randTile(1,tickCount,31)*cands.length)|0];
+    const b=cands[(randTile(2,tickCount,32)*cands.length)|0];
+    if((rank[a]??0) < (rank[b]??0)) return a;
+    if((rank[b]??0) < (rank[a]??0)) return b;
+    const ia=cands.indexOf(a), ib=cands.indexOf(b);
+    const ca=crowd[ia]??0, cb=crowd[ib]??0;
+    return (ca > cb) ? a : b;
+  }
   function agStep(){
     if(!AG.enabled) return;
+    const {rank, fronts}=paretoRank();
     const evalBudget = Math.max(1, Math.floor(numVal(el('evals'), 40) * PERF.workScale));
-    for (let e = evalBudget; e > 0; e--) {
-      const {fronts}=paretoRank();
+    for (let e = 0; e < evalBudget; e++) {
       const pool = (fronts[0] && fronts[0].length>=2) ? fronts[0] : Array.from({length:AG.inds.length},(_,i)=>i);
-      const pa=AG.inds[ pool[(Math.random()*pool.length)|0] ];
-      const pb=AG.inds[ pool[(Math.random()*pool.length)|0] ];
-      const N=pa.order.length, a=(Math.random()*N)|0, b=(a+((Math.random()*(N-1))|0))%N;
+      const crowd = pool.length ? crowdingDistance(pool, AG.inds) : [];
+      const paIdx = binaryTournament(pool, rank, crowd);
+      const pbIdx = binaryTournament(pool, rank, crowd);
+      const pa=AG.inds[paIdx], pb=AG.inds[pbIdx];
+
+      const N=pa.order.length, a=(randTile(e,tickCount,281)*N)|0, b=(a+((randTile(e+1,tickCount,282)*(N-1))|0))%N;
       const child=new Array(N).fill(-1); const taken=new Set(); const [lo,hi]=a<b?[a,b]:[b,a];
       for(let i=lo;i<=hi;i++){ child[i]=pa.order[i]; taken.add(pa.order[i]); }
       let idxw=(hi+1)%N; for(let i=0;i<N;i++){ const gene=pb.order[(hi+1+i)%N]; if(!taken.has(gene)){ child[idxw]=gene; idxw=(idxw+1)%N; } }
-      if(Math.random()<0.5){ const i1=(Math.random()*N)|0, j1=(i1+2+((Math.random()*(N-3))|0))%N; if(i1<j1){ for(let p=i1,q=j1;p<q;p++,q--){ const t=child[p]; child[p]=child[q]; child[q]=t; } } }
+      if(randTile(e+2,tickCount,283)<0.5){ const i1=(randTile(e+3,tickCount,284)*N)|0, j1=(i1+2+((randTile(e+4,tickCount,285)*(N-3))|0))%N; if(i1<j1){ for(let p=i1,q=j1;p<q;p++,q--){ const t=child[p]; child[p]=child[q]; child[q]=t; } } }
       const worstI = AG.inds.reduce((bi,_,i)=> (bi<0||AG.inds[i].f[0]>AG.inds[bi].f[0])?i:bi, -1);
       const L=tourLength(child);
       let railA=0, semH=0; const N2=child.length;
       for(let k=0;k<N2;k++){ const aC=TSP.cities[child[k]]; const ii=idx(Math.round(aC.x),Math.round(aC.y));
         railA+= (railField[ii*3+0]+railField[ii*3+1]+railField[ii*3+2]);
-        const [q,p,s]=[get(ii,CH.Q),get(ii,CH.P),get(ii,CH.S)]; semH+=(q*p+p*s+q*s)/3;}
+        const s=get(ii,CH.S); semH+=s;}
       railA/=N2; semH/=N2;
       AG.inds[worstI]={order:child,f:[L,(1-railA),(1-clamp01(semH))]};
     }
     const prevBest=TSP.best;
-    const {fronts}=paretoRank();
-    if(fronts[0] && fronts[0].length){
-      let bestIdx=fronts[0][0], bestL=AG.inds[bestIdx].f[0];
-      for(const i of fronts[0]) if(AG.inds[i].f[0]<bestL){ bestL=AG.inds[i].f[0]; bestIdx=i; }
+    const {fronts:fronts2}=paretoRank();
+    if(fronts2[0] && fronts2[0].length){
+      let bestIdx=fronts2[0][0], bestL=AG.inds[bestIdx].f[0];
+      for(const i of fronts2[0]) if(AG.inds[i].f[0]<bestL){ bestL=AG.inds[i].f[0]; bestIdx=i; }
       TSP.tour = Array.from(AG.inds[bestIdx].order);
-      TSP.len = bestL; if(TSP.len<TSP.best){ TSP.best=TSP.len; q2EmitClass(Q2_CLASS.AGPick, [[10,Q2_TYPE.UINT3,Math.floor(TSP.len*100)]]); }
+      TSP.len = bestL; if(TSP.len<TSP.best){ TSP.best=TSP.len; dnaEmitClass(Q2_CLASS.AGPick,{tick:tickCount}); }
     }
     AG.lastDelta = (prevBest - TSP.best);
     el('front0').textContent=AG.front0.toString();
@@ -1213,7 +1276,7 @@
     if(((tileMask(ti)&1) && (tileMask(tj)&1))){ const ttl=6.0; rayEdges.push({u:ti,v:tj,life:ttl,ttl}); while(rayEdges.length>MAX_RAY_EDGES) rayEdges.shift(); }
   }
 
-  // ---------- DomainApply + CRC ----------
+  // ---------- DomainApply + CRC (preview demo) ----------
   const codeRect={x:2,y:2,w:16,h:8}; let crcOk=0, crcBad=0;
   function crc32(bytes){ let c=~0; for(const b of bytes){ c^=b; for(let k=0;k<8;k++) c = (c&1)?(0xEDB88320 ^ (c>>>1)):(c>>>1); } return ~c>>>0; }
   function proposeCodeUpdate(){
@@ -1221,9 +1284,9 @@
     const c=crc32(bytes);
     if((c&0xFF) < 160){
       crcOk++;
-      for(let yy=0;yy<codeRect.h;yy++) for(let xx=0;xx<codeRect.w;xx++){ const i=idx(codeRect.x+xx,codeRect.y+yy); const v=clamp01(get(i,CH.Q)*0.9 + 0.1*(bytes[yy*codeRect.w+xx]/255)); set(i,CH.Q, applyDomain(get(i,CH.Q), v, i, 1)); }
-      q2EmitClass(Q2_CLASS.CRCok, [[6,Q2_TYPE.UINT3,tickCount%243]]);
-    } else { crcBad++; q2EmitClass(Q2_CLASS.CRCbad, [[6,Q2_TYPE.UINT3,tickCount%243]]); }
+      for(let yy=0;yy<codeRect.h;yy++) for(let xx=0;xx<codeRect.w;xx++){ const i=idx(codeRect.x+xx,codeRect.y+yy); const v=qWrite( clamp01(get(i,CH.Q)*0.9 + 0.1*(bytes[yy*codeRect.w+xx]/255)) ); set(i,CH.Q, applyDomain(get(i,CH.Q), v, i, 1)); }
+      dnaEmitClass(Q2_CLASS.CRCok, {tick:tickCount});
+    } else { crcBad++; dnaEmitClass(Q2_CLASS.CRCbad, {tick:tickCount}); }
   }
 
   // ---------- Drawing ----------
@@ -1302,8 +1365,7 @@
         const ind = AG.inds[idxInd];
         if(!ind) continue;
         const hue = (n*360/count)|0;
-        g2d.strokeStyle=`hsla(${hue},85%,65%,0.28)`;
-        g2d.lineWidth=2.0; g2d.beginPath();
+        g2d.strokeStyle=`hsla(${hue},85%,65%,0.28)`; g2d.lineWidth=2.0; g2d.beginPath();
         const N=ind.order.length;
         for(let k=0;k<N;k++){
           const a=TSP.cities[ind.order[k]], b=TSP.cities[ind.order[(k+1)%N]];
@@ -1398,14 +1460,14 @@
     return v;
   }
   function proposeTweak(ps){
-    const k = PARAMS_KEYS[(Math.random()*PARAMS_KEYS.length)|0];
+    const k = PARAMS_KEYS[(randTile(13,tickCount,301)*PARAMS_KEYS.length)|0];
     const [lo,hi]=BOUNDS[k]; const span=hi-lo;
     let nv;
     if(k==='predEnable'){
-      nv = (Math.random()<0.15) ? (ps.predEnable?0:1) : ps.predEnable;
+      nv = (randTile(14,tickCount,302) < 0.15) ? (ps.predEnable?0:1) : ps.predEnable;
     }else{
       const amp=OPT.amp;
-      nv = ps[k] + (Math.random()*2-1) * (k==='stepsPerFrame' ? Math.max(20,span*amp) : span*amp);
+      nv = ps[k] + ((randTile(15,tickCount,303)*2-1) * (k==='stepsPerFrame' ? Math.max(20,span*amp) : span*amp));
     }
     const out={...ps, [k]: clampToBounds(k,nv)};
     return out;
@@ -1453,7 +1515,7 @@
     } else {
       const candScore = score;
       const improve = candScore > OPT.acceptedScore + 1e-6;
-      const explore = Math.random() < OPT.eps;
+      const explore = randTile(16,tickCount,304) < OPT.eps;
       if(improve || explore){
         OPT.acceptedParams = {...OPT.candidate};
         OPT.acceptedScore = candScore;
@@ -1477,9 +1539,12 @@
   function tick(){
     tickCount++;
     meaningfulFlips(numVal(el('pFlip'),0.002), numVal(el('edgeBias'),1.5));
+
     if(on(el('q2Enable'))){
-      forEachPixel((x,y,i)=>{ const a=prevRails[i], b=rails[i]; if(a!==b){ const axis=(orient[i]===1)?2:(orient[i]===2)?3:4; q2EmitFlip(x,y,a,b,axis);} });
+      // Emit a compact flip summary rather than per-pixel tokens (CPU-friendly)
+      if(flipsLast>0){ dnaEmitCompound({cls:Q2_CLASS.Flip, a:flipsLast&0xFFFF, b:eventsLast&0xFFFF, bindKey:(mortonXY(flipsLast%TX, eventsLast%TY)), gate: GateAffinity.Rails}); }
     }
+
     const rVal = Math.max(1, Math.min(12, numVal(el('rad'),5)));
     buildRailField(rVal);
     scheduleTiles();
@@ -1504,7 +1569,6 @@
       else{ updateNNMAuto(); }
       if(TSP.dynamic) tspDynamicDrift();
 
-      // Governed 2-opt workload
       const halfSteps = Math.max(1, Math.floor(TSP.stepsPerFrame * PERF.workScale * 0.5));
       for (let s = 0; s < halfSteps; s++) twoOptAttempt();
 
@@ -1531,9 +1595,7 @@
       el('fps').textContent=fps; el('flips').textContent=flipsLast; el('events').textContent=eventsLast; rotY+=0.004;
       const lenNow = TSP.len||0;
       optPushMetrics(fpsNow, lenNow);
-      // perf governor each frame
       perfUpdateGovernor();
-      // optimizer step
       OPT.enabled = on(el('soEnable'), false);
       OPT.objective = (el('soObjective')?.value)||'BAL';
       OPT.perfWeight = numVal(el('soBalance'),0.5);
@@ -1554,12 +1616,12 @@
       let {x,y}=TSP.cities[k];
       const gx=(railField[idx(Math.round(x+1),Math.round(y))*3+0]-railField[idx(Math.round(x-1),Math.round(y))*3+0])*0.5;
       const gy=(railField[idx(Math.round(x),Math.round(y+1))*3+1]-railField[idx(Math.round(x),Math.round(y-1))*3+1])*0.5;
-      x += step*gx + (Math.random()*2-1)*jitter; y += step*gy + (Math.random()*2-1)*jitter; x=Math.max(0,Math.min(W-1,x)); y=Math.max(0,Math.min(H-1,y));
+      x += step*gx + (randTile(k,tickCount,321)*2-1)*jitter; y += step*gy + (randTile(k+777,tickCount,322)*2-1)*jitter; x=Math.max(0,Math.min(W-1,x)); y=Math.max(0,Math.min(H-1,y));
       if(!gateAtPixel(idx(Math.round(x),Math.round(y)))){ x=(x+W/7)%W; y=(y+H/5)%H; }
       if(currentPrecision()==='MACRO'){ x=Math.floor(x/TILE)*TILE+TILE/2; y=Math.floor(y/TILE)*TILE+TILE/2; }
       TSP.cities[k].x=x; TSP.cities[k].y=y;
     }
-    TSP.len=tourLength(TSP.tour); if(TSP.len<TSP.best){ TSP.best=TSP.len; pushHist(TSP.len); q2EmitClass(Q2_CLASS.TSPImprove,[[10,Q2_TYPE.UINT3,Math.floor(TSP.len*100)]]); }
+    TSP.len=tourLength(TSP.tour); if(TSP.len<TSP.best){ TSP.best=TSP.len; pushHist(TSP.len); dnaEmitClass(Q2_CLASS.TSPImprove,{tick:tickCount}); }
   }
 
   // ---------- NNMs support ----------
@@ -1593,10 +1655,14 @@
     el('soIntVal').textContent=numVal(el('soInterval')).toFixed(2)+'s';
     el('soAmpVal').textContent=(numVal(el('soExplore'))).toFixed(2);
     el('soEpsVal').textContent=(numVal(el('soEps'))).toFixed(2);
+    el('precDepthVal').textContent = numVal(el('precDepth'),3).toString();
     el('nodeVal') && (el('nodeVal').textContent='×'+(numVal(el('nodeScale')||{value:1.6},1.6)).toFixed(1));
   }
-  ['pFlip','edgeBias','rad','thr','usteps','ctauAmp','atomicRange','cities','topk','pop','evals','stepsPerFrame','q2Cap','frontN','predLambda','predHorizon','predAlpha','soBalance','soInterval','soExplore','soEps'].forEach(id=>{
-    const e=el(id); if(e) e.oninput=()=>{ if(id==='q2Cap'){ q2CapBytes=numVal(el('q2Cap'))*1024; q2UpdatePreview(); } refreshLabels(); };
+  ['pFlip','edgeBias','rad','thr','usteps','ctauAmp','atomicRange','cities','topk','pop','evals','stepsPerFrame','q2Cap','frontN','predLambda','predHorizon','predAlpha','soBalance','soInterval','soExplore','soEps','precDepth'].forEach(id=>{
+    const e=el(id); if(e) e.oninput=()=>{ 
+      if(id==='q2Cap'){ const kb=numVal(el('q2Cap'))|0; dnaBuffer = new Uint8Array(kb*1024); dnaReset(); q2UpdatePreview(); } 
+      refreshLabels(); 
+    };
   });
 
   el('ecoMode') && (el('ecoMode').onchange = ()=> perfUpdateGovernor());
@@ -1604,8 +1670,8 @@
   el('btnToggle').onclick=()=>{ running=!running; el('btnToggle').textContent=running?'⏸ Pause':'▶ Start'; el('state').textContent=running?'running':'paused'; el('state').style.color=running?'var(--ok)':'#b6c1cc'; };
   el('btnStep').onclick=()=>{ const was=running; running=false; tick(); if(was) running=true; };
   el('btnReset').onclick=()=>{ reseedAll(); draw2D(); draw3D(); };
-  el('q2Reset').onclick=()=>{ q2Tokens=[]; q2UpdatePreview(); };
-  el('q2Copy').onclick=()=>{ navigator.clipboard?.writeText(q2CodonString()); const p=el('q2Preview'); if(p) p.textContent='(codons copied)'; };
+  el('q2Reset').onclick=()=>{ dnaReset(); q2UpdatePreview(); };
+  el('q2Copy').onclick=()=>{ navigator.clipboard?.writeText(dnaPreviewHex()); const p=el('q2Preview'); if(p) p.textContent='(DNA copied)'; };
   el('q2ClearH').onclick=()=>{ q2ClassHist.clear(); q2UpdatePreview(); };
   el('quadReseed').onclick=()=>{ reseedQuadrants(); };
   el('tspReseed').onclick=()=>{ setCityCount(numVal(el('cities'))); initCities(); initTour(); if(AG.enabled) agInit(); };
@@ -1622,12 +1688,19 @@
 
   // ---------- Boot ----------
   function reseedAll(){
+    // reseed global RNG from payload for reproducibility
+    const payload = el('payload')?.value || 'BNP';
+    const sGen = seedFromString(payload);
+    const seed = Math.floor(sGen()*0xffffffff) | 0;
+    setGlobalSeed(seed);
+
     on(el('meaning'),true) ? buildMeaningful() : buildRandom();
+    initAxialQP();
     smoothSemantic(1);
     prevRails = new Uint8Array(rails);
     reseedGates(); reseedQuadrants(); reseedCTau();
     scheduleTiles();
-    tickCount=0; hsTotal=0; reqEdges=0; ackEdges=0; q2Tokens=[]; q2ClassHist.clear(); q2UpdatePreview();
+    tickCount=0; hsTotal=0; reqEdges=0; ackEdges=0; dnaReset(); q2UpdatePreview();
     trailEdges.length=0; rayEdges.length=0; residQ.fill(0); residP.fill(0); residS.fill(0);
     setCityCount(numVal(el('cities'),40)); initCities(); initTour();
     if(on(el('agprcEnable'))) { AG.enabled=true; AG.pop=numVal(el('pop'),20); AG.evals=numVal(el('evals'),40); agInit(); }
@@ -1635,12 +1708,16 @@
     OPT.phase='BASELINE'; optResetWindows(); OPT.acceptedParams=null; OPT.acceptedScore=null; OPT.bestParams=null; OPT.bestScore=-Infinity;
   }
 
+  function reseedCTau(){
+    for(let t=0;t<NT;t++){ cTau[t]=0.5 + 1.0*(hash2(t,~t)%1000)/1000 * numVal(el('ctauAmp'),0.5); }
+  }
+
   function smoothSemantic(iter=1){
     for(let k=0;k<iter;k++){
       forEachPixel((x,y,i)=>{
-        let q=0,p=0,s=0,c=0;
-        for(let dy=-1;dy<=1;dy++) for(let dx=-1;dx<=1;dx++){ const j=idx(x+dx,y+dy); q+=get(j,CH.Q); p+=get(j,CH.P); s+=get(j,CH.S); c++; }
-        set(i,CH.Q,q/c); set(i,CH.P,p/c); set(i,CH.S,s/c);
+        let s=0,c=0;
+        for(let dy=-1;dy<=1;dy++) for(let dx=-1;dx<=1;dx++){ const j=idx(x+dx,y+dy); s+=get(j,CH.S); c++; }
+        set(i,CH.S,qWrite(s/c));
       });
     }
   }
