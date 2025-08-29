@@ -75,6 +75,14 @@
       <label class="inline small"><input type="checkbox" id="fog" checked> Fog-of-war (radar)</label>
       <label class="inline small"><input type="checkbox" id="showSpecs"> Show specs</label>
 
+      <div class="hr"></div>
+      <h2>BNP Bridge</h2>
+      <label class="inline small"><input type="checkbox" id="bnpEnable"> Enable BNP bridge</label>
+      <label class="inline small"><input type="checkbox" id="bnpAutoDraw" checked> Auto‑draw BNP 2D</label>
+      <div class="kvs small">
+        <div>Status</div><div class="mono" id="bnpStatus">detached</div>
+      </div>
+
       <h2>Config</h2>
       <textarea id="cfgText" rows="14" class="mono small"></textarea>
       <div class="row"><button id="applyCfg">Apply Config</button><span class="tag">live-safe</span></div>
@@ -1735,7 +1743,95 @@ el('applyCfg').onclick = ()=>{
 el('speed').oninput=()=> el('speedLbl').textContent = (+el('speed').value).toFixed(2)+'Ã—';
 el('zoom').oninput=()=>{ camZoom=mapCam.zoom=+el('zoom').value; clampMapCam(); draw2D(); };
 el('fitMap').onclick=()=>{ camZoom=mapCam.zoom=1; mapCam.x=0; mapCam.y=0; el('zoom').value=camZoom; camDist=260 + (world.size*Math.sqrt(3)/2)*2.1; clampMapCam(); draw2D(); };
-el('resetSky').onclick=()=>{ skyCam.yaw=0; skyCam.pitch=0; skyCam.zoom=1; generateStars(); };
+  el('resetSky').onclick=()=>{ skyCam.yaw=0; skyCam.pitch=0; skyCam.zoom=1; generateStars(); };
+
+  /* ============================ BNP BRIDGE ============================ */
+  const BNPBridge = (()=>{
+    let attached=false;
+    let W=0,H=0;
+    let lastSyncTick=-1;
+    const unsubs=[];
+    const CH = ()=> (window.BNP && window.BNP.size && window.BNP.size.CH) || {R:0,G:1,B:2,Q:3,P:4,S:5};
+    const SAMP=3; // brush radius in pixels
+    function avail(){ return (typeof window!=='undefined' && window.BNP && window.BNP.size && window.BNP.pixel); }
+    function worldToGrid(x,z){
+      const half = world.half || (RTS_CFG.world.size/2);
+      const gx = Math.round( ( (x + half) / (2*half) ) * (W-1) );
+      const gy = Math.round( ( (z + half) / (2*half) ) * (H-1) );
+      return [ Math.max(0,Math.min(W-1,gx)), Math.max(0,Math.min(H-1,gy)) ];
+    }
+    function stampCircle(x,y,val,chIndex){
+      const r=SAMP;
+      for(let dy=-r; dy<=r; dy++){
+        for(let dx=-r; dx<=r; dx++){
+          if(dx*dx+dy*dy>r*r) continue;
+          const xx = x+dx, yy = y+dy;
+          if(xx<0||yy<0||xx>=W||yy>=H) continue;
+          const i = window.BNP.util.idx(xx,yy);
+          window.BNP.pixel.setChannelSafe(i, chIndex, val);
+        }
+      }
+    }
+    function clearFrame(){
+      const buf = window.BNP.buffers.sheet;
+      for(let i=0;i<W*H;i++){
+        const b=i*6;
+        buf[b+0]*=0.90; buf[b+1]*=0.90; buf[b+2]*=0.90;
+        buf[b+3]*=0.92; buf[b+4]*=0.92; buf[b+5]*=0.92;
+      }
+    }
+    function syncOnce(){
+      if(!attached || !avail()) return false;
+      if(lastSyncTick===tickCount) return true;
+      lastSyncTick=tickCount;
+      clearFrame();
+      // Resources -> S
+      for(const r of resources){
+        const [x,y]=worldToGrid(r.pos[0], r.pos[2]);
+        stampCircle(x,y, r.type===T.ResFuel?0.9:0.65, CH().S);
+      }
+      // Factions: Red->Q, Blue->P; also tint RGB
+      for(const e of entities){
+        if(e.hidden) continue;
+        const [x,y]=worldToGrid(e.pos[0], e.pos[2]);
+        const ch = (e.faction===0) ? CH().Q : CH().P;
+        stampCircle(x,y, 0.85, ch);
+        const i=window.BNP.util.idx(x,y);
+        const col = (e.faction===0)? [0.85,0.15,0.20] : [0.15,0.45,0.85];
+        window.BNP.pixel.setChannelSafe(i, CH().R, col[0]);
+        window.BNP.pixel.setChannelSafe(i, CH().G, col[1]);
+        window.BNP.pixel.setChannelSafe(i, CH().B, col[2]);
+      }
+      // Rails along team links
+      const rails = window.BNP.buffers.rails; rails.fill(0);
+      for(const tm of teams){
+        const leader = getById(tm.leader); if(!leader) continue;
+        for(const id of tm.members){ const u=getById(id); if(!u||u.id===leader.id) continue;
+          const [x0,y0]=worldToGrid(leader.pos[0], leader.pos[2]);
+          const [x1,y1]=worldToGrid(u.pos[0], u.pos[2]);
+          const dx=Math.abs(x1-x0), sx=x0<x1?1:-1; const dy=-Math.abs(y1-y0), sy=y0<y1?1:-1; let err=dx+dy, x=x0, y=y0; const lane=((tm.id%3)+1);
+          for(;;){ rails[window.BNP.util.idx(x,y)] = lane; if(x===x1 && y===y1) break; const e2=2*err; if(e2>=dy){ err+=dy; x+=sx; } if(e2<=dx){ err+=dx; y+=sy; } }
+        }
+      }
+      window.BNP.rails.buildRailFieldFull(5);
+      if(document.getElementById('bnpAutoDraw')?.checked){ window.BNP.draw.draw2D(); }
+      return true;
+    }
+    function attach(){
+      if(!avail()) return false;
+      const sz=window.BNP.size; W=sz.W; H=sz.H; attached=true; const s=document.getElementById('bnpStatus'); if(s) s.textContent='attached';
+      // Event hooks -> DNA bus (lightweight)
+      try{
+        unsubs.push(events.on('entity-added', e=>{ window.BNP.dna.dnaEmitClass(window.BNP.dna.Q2_CLASS.Resid,{tick:tickCount}); }));
+        unsubs.push(events.on('entity-removed', e=>{ window.BNP.dna.dnaEmitClass(window.BNP.dna.Q2_CLASS.Hs,{tick:tickCount}); }));
+        unsubs.push(events.on('resource-added', r=>{ window.BNP.dna.dnaEmitClass(window.BNP.dna.Q2_CLASS.CRCok,{tick:tickCount}); }));
+        unsubs.push(events.on('resource-removed', r=>{ window.BNP.dna.dnaEmitClass(window.BNP.dna.Q2_CLASS.CRCbad,{tick:tickCount}); }));
+      }catch(_e){}
+      return true;
+    }
+    function detach(){ attached=false; while(unsubs.length){ const off=unsubs.pop(); try{ off&&off(); }catch(_){} } const s=document.getElementById('bnpStatus'); if(s) s.textContent='detached'; }
+    return { attach, detach, syncOnce };
+  })();
 
 /* ============================ MATH / UTILS ============================ */
 function calcFuelRange(u){
@@ -5205,10 +5301,11 @@ function loop(t){
     }else{
       draw3D();
     }
-  updateCard();
-  updateSelectedPanel();
-  updateKPI();
-  rafHandle=requestAnimationFrame(loop);
+    if(document.getElementById('bnpEnable')?.checked){ BNPBridge.syncOnce(); }
+    updateCard();
+    updateSelectedPanel();
+    updateKPI();
+    rafHandle=requestAnimationFrame(loop);
 }
 
 el('btnToggle').onclick=()=>{
@@ -5225,6 +5322,15 @@ el('btnToggle').onclick=()=>{
 };
 el('btnStep').onclick=()=>{ const was=running; running=false; stepSim(1/60); if(was) running=true; };
 el('btnReset').onclick=()=>{ reseedAll(); hideCard(); };
+
+// BNP controls
+const bnpEnableEl = el('bnpEnable');
+if(bnpEnableEl){
+  bnpEnableEl.onchange = ()=>{
+    if(bnpEnableEl.checked){ if(!BNPBridge.attach()){ const s=el('bnpStatus'); if(s) s.textContent='unavailable'; bnpEnableEl.checked=false; } }
+    else { BNPBridge.detach(); }
+  };
+}
 
 function genAndSpawn(){
   genWorld();
@@ -5251,4 +5357,3 @@ rafHandle=requestAnimationFrame(loop);
 </script>
 </body>
 </html>
-
