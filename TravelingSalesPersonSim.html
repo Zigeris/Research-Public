@@ -1722,6 +1722,112 @@
     }
   }
 
+  // ---------- BNP Public API ----------
+  // Event hooks
+  const BNP_EVT = { dna: new Set(), tick: new Set() };
+  const __dnaEmitCompound = dnaEmitCompound;
+  dnaEmitCompound = function(args){
+    __dnaEmitCompound(args);
+    try { for(const fn of BNP_EVT.dna) fn(args); } catch(_){}
+  };
+  const __tick = tick;
+  tick = function(){
+    __tick();
+    try { for(const fn of BNP_EVT.tick) fn({ tick: tickCount }); } catch(_){}
+  };
+
+  // Lightweight UI helpers
+  function uiSetValue(id, v){ const e=el(id); if(e) e.value=v; }
+  function uiGetValue(id, d){ const e=el(id); return (e && e.value!=null)? e.value : d; }
+  function uiSetChecked(id, b){ const e=el(id); if(e) e.checked=!!b; }
+  function uiGetChecked(id, d=false){ const e=el(id); return (e && typeof e.checked==='boolean')? e.checked : d; }
+
+  // Safe pixel/channel writes
+  function setChannelSafe(i, ch, v){
+    const chBit = (ch===CH.R||ch===CH.G||ch===CH.B)?0 : (ch===CH.S?2:1);
+    const cur = get(i, ch);
+    set(i, ch, applyDomain(cur, qWrite(v), i, chBit));
+  }
+  function setPixelSafe(i, rgbaqps){
+    const o = rgbaqps||{};
+    if(o.r!=null) setChannelSafe(i, CH.R, o.r);
+    if(o.g!=null) setChannelSafe(i, CH.G, o.g);
+    if(o.b!=null) setChannelSafe(i, CH.B, o.b);
+    if(o.q!=null) setChannelSafe(i, CH.Q, o.q);
+    if(o.p!=null) setChannelSafe(i, CH.P, o.p);
+    if(o.s!=null) setChannelSafe(i, CH.S, o.s);
+  }
+  function getPixel(i){ return { r:get(i,CH.R), g:get(i,CH.G), b:get(i,CH.B), q:get(i,CH.Q), p:get(i,CH.P), s:get(i,CH.S) }; }
+  function getAt(x,y){ return getPixel(idx(x,y)); }
+  function setAtSafe(x,y,rgbaqps){ setPixelSafe(idx(x,y), rgbaqps); }
+
+  // Public API surface
+  window.BNP = {
+    version: '1.0',
+    size: { W, H, TILE, TX, TY, NT, CH },
+    util: { idx, tIdx, clamp01, lerp, hann, qQuantize01: qQuantize01, qWrite: qWrite },
+    ui: { el, setValue: uiSetValue, getValue: uiGetValue, setChecked: uiSetChecked, getChecked: uiGetChecked },
+    rng: { setSeed: setGlobalSeed, rand01, randTile, randPixel, seedFromString },
+    buffers: {
+      sheet, rails, railField, edgeMap, orient,
+      gateTile, domainMask,
+      residQ, residP, residS, cTau, regEnergyTile,
+      tileActive, bitBias, tileA, tileB, tileC, tileSUM, tileCAR, tilePos, tileFlow,
+      get dnaBuffer(){ return dnaBuffer; }, get dnaWritePtr(){ return dnaWritePtr; }, q2ClassHist
+    },
+    pixel: { get: getPixel, setSafe: setPixelSafe, getAt, setAtSafe, setChannelSafe },
+    domain: {
+      gateAtPixel, tileMask, reseedGates, reseedQuadrants,
+      setGateTile: (t,open)=>{ gateTile[t]=open?1:0; },
+      setDomainMask: (t,mask)=>{ domainMask[t]=mask|0; },
+      enableStrictBNP: (b)=> uiSetChecked('strictBNP', !!b),
+      enablePrivS: (b)=> uiSetChecked('privS', !!b),
+      enableQuad: (b)=> uiSetChecked('quadEnable', !!b),
+      enableGate: (b)=> uiSetChecked('gateEnable', !!b),
+      enableGateRails: (b)=> uiSetChecked('gateRails', !!b)
+    },
+    rails: { meaningfulFlips, buildRailFieldFull, buildRailField, kernelForR, lastFlipsIdx },
+    scheduler: { computeBitBias, scheduleTiles, bitonicSortIdxDesc },
+    logic: {
+      eval: evalLogicTierAware,
+      getFusionWeights: ()=>({ ...FW }),
+      setFusionWeights: (w)=>{ FW={...FW, ...w}; },
+      setThreshold: (thr)=>{ uiSetValue('thr', thr); refreshLabels(); }
+    },
+    micro: { OPC, getProgram: ()=>DEFAULT_PROGRAM, setProgram: (prog)=>{ DEFAULT_PROGRAM.length=0; for(const ins of prog) DEFAULT_PROGRAM.push(ins); }, step: microInterpreterStep },
+    pred: { PRED, predInitFromCurrent, predictiveUpdate, computeEdgeFromS },
+    tsp: {
+      TSP, initCities, initTour, twoOptAttempt, topKImprove, tspDynamicDrift, updateNNMAuto,
+      segmentCost, edgeCost, tourLength, setCityCount,
+      setModel: (m)=>{ const e=el('costModel'); if(e){ e.value=m; } },
+      setPrecision: (p)=>{ const e=el('precision'); if(e){ e.value=p; } },
+      setCities: (arr)=>{ TSP.cities = arr.map(({x,y})=>({x,y})); setCityCount(arr.length); initTour(); },
+      getCities: ()=> TSP.cities.map(c=>({x:c.x,y:c.y})),
+      getTour: ()=> Array.from(TSP.tour)
+    },
+    ag: { AG, agInit, agStep, agEvalAll, paretoRank, crowdingDistance },
+    dna: { Q2_CLASS, dnaReset, dnaPush, dnaPreviewHex, dnaEmitCompound, dnaEmitClass, q2UpdatePreview },
+    draw: { draw2D, draw3D, proj3D },
+    perf: { PERF, perfUpdateGovernor },
+    opt: {
+      OPT, getParamsFromUI, applyParamsToUI, describeParams, proposeTweak, computeScore,
+      enable: (b)=> uiSetChecked('soEnable', !!b)
+    },
+    loop: {
+      start: ()=>{ running=true; const b=el('btnToggle'); const s=el('state'); if(b) b.textContent='⏸ Pause'; if(s){ s.textContent='running'; s.style.color='var(--ok)'; } },
+      stop: ()=>{ running=false; const b=el('btnToggle'); const s=el('state'); if(b) b.textContent='▶ Start'; if(s){ s.textContent='paused'; s.style.color='#b6c1cc'; } },
+      isRunning: ()=> running,
+      step: ()=>{ const was=running; running=false; __tick(); if(was) running=true; }
+    },
+    boot: { reseedAll, smoothSemantic, initAxialQP, reseedCTau },
+    events: {
+      onDNA: (fn)=>{ BNP_EVT.dna.add(fn); return ()=>BNP_EVT.dna.delete(fn); },
+      offDNA: (fn)=> BNP_EVT.dna.delete(fn),
+      onTick: (fn)=>{ BNP_EVT.tick.add(fn); return ()=>BNP_EVT.tick.delete(fn); },
+      offTick: (fn)=> BNP_EVT.tick.delete(fn)
+    }
+  };
+
   refreshLabels(); reseedAll(); draw2D(); draw3D(); perfUpdateGovernor(); requestAnimationFrame(loop);
 
 })();
